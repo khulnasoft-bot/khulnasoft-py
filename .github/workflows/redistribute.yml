@@ -35,6 +35,7 @@ jobs:
         run: |
           cd dist/khulnasoft*/
           pip install --editable .
+          pip install pytest pytest-asyncio pytest-xdist
       - name: Run source distribution tests
         run: |
           cd dist/khulnasoft*/

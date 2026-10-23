@@ -31,10 +31,12 @@ from khulnasoft.headers import geolocation, ip_address, set_headers
 
 app = FastAPI()
 
+
 @app.middleware("http")
 async def khulnasoft_context_middleware(request: Request, call_next: Callable):
     set_headers(request.headers)
     return await call_next(request)
+
 
 @app.get("/api/headers")
 async def headers_info(request: Request):
@@ -53,13 +55,14 @@ async def headers_info(request: Request):
 ```python
 from khulnasoft.cache import get_cache
 
+
 def main():
     cache = get_cache(namespace="demo")
 
     cache.delete("greeting")
     cache.set("greeting", {"hello": "world"}, {"ttl": 60, "tags": ["demo"]})
     value = cache.get("greeting")  # dict or None
-    cache.expire_tag("demo")        # invalidate by tag
+    cache.expire_tag("demo")  # invalidate by tag
 ```
 
 #### Sync Client
@@ -68,16 +71,18 @@ from khulnasoft.cache import RuntimeCache
 
 cache = RuntimeCache(namespace="demo")
 
+
 def main():
     cache.delete("greeting")
     cache.set("greeting", {"hello": "world"}, {"ttl": 60, "tags": ["demo"]})
     value = cache.get("greeting")  # dict or None
-    cache.expire_tag("demo")        # invalidate by tag
+    cache.expire_tag("demo")  # invalidate by tag
 ```
 
 #### Async
 ```python
 from khulnasoft.cache.aio import get_cache
+
 
 async def main():
     cache = get_cache(namespace="demo")
@@ -85,7 +90,7 @@ async def main():
     await cache.delete("greeting")
     await cache.set("greeting", {"hello": "world"}, {"ttl": 60, "tags": ["demo"]})
     value = await cache.get("greeting")  # dict or None
-    await cache.expire_tag("demo")        # invalidate by tag
+    await cache.expire_tag("demo")  # invalidate by tag
 ```
 
 #### Async Client
@@ -160,7 +165,7 @@ Requires `BLOB_READ_WRITE_TOKEN` to be set as an env var or `token` to be set wh
 ```python
 from khulnasoft.blob import BlobClient
 
-client = BlobClient()  
+client = BlobClient()
 # or BlobClient(token="...")
 
 # Create a folder entry, upload a local file, list, then download
@@ -181,6 +186,7 @@ Async usage:
 import asyncio
 from khulnasoft.blob import AsyncBlobClient
 
+
 async def main():
     client = AsyncBlobClient()  # uses BLOB_READ_WRITE_TOKEN from env
 
@@ -197,6 +203,7 @@ async def main():
     listing = await client.list_objects(prefix="examples/assets/")
     content = await client.get(uploaded.url)
     await client.delete([b.url for b in listing.blobs])
+
 
 asyncio.run(main())
 ```
@@ -254,7 +261,9 @@ from khulnasoft.blob import BlobClient, create_multipart_uploader
 
 # Create the uploader (initializes the upload)
 client = BlobClient()
-uploader = client.create_multipart_uploader("large-file.bin", content_type="application/octet-stream")
+uploader = client.create_multipart_uploader(
+    "large-file.bin", content_type="application/octet-stream"
+)
 
 # Upload parts (you control when and how)
 parts = []

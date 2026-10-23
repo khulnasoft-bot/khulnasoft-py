@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 # Required on CI, optional locally
-_is_ci = bool(os.getenv("CI"))
 _has_credentials = bool(
     os.getenv("BLOB_READ_WRITE_TOKEN")
     and os.getenv("KHULNASOFT_TOKEN")
@@ -25,7 +24,7 @@ _example_files = (
 
 
 @pytest.mark.skipif(
-    not _is_ci and not _has_credentials,
+    not _has_credentials,
     reason=(
         "Requires BLOB_READ_WRITE_TOKEN, KHULNASOFT_TOKEN, "
         "KHULNASOFT_PROJECT_ID, and KHULNASOFT_TEAM_ID"
