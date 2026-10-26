@@ -25,7 +25,7 @@ sandbox = "khulnasoft.sandbox.__main__:main"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.17.1",
+    "ruff>=0.17.2",
     "pytest>=9.1.1",
     "pytest-asyncio",
     "pytest-xdist",
