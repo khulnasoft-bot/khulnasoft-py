@@ -1,71 +1,229 @@
 name: Publish PyPI
+
 on:
   push:
     branches:
-      - main   # publish on push to main
+      - main
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify without uploading to PyPI
+        type: boolean
+        default: false
+      force:
+        description: Inspect every publishable package
+        type: boolean
+        default: false
 
-permissions:
-  contents: write  # required for creating tags
-  id-token: write  # required for Trusted Publishing (OIDC)
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  check-version:
-    runs-on: [self-hosted, Linux, X64]
+  detect:
+    name: Detect release
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.base.ref == 'main' &&
+      contains(github.event.pull_request.labels.*.name, 'release'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     outputs:
-      should-publish: ${{ steps.version-check.outputs.should-publish }}
+      packages: ${{ steps.detect.outputs.packages }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.14"
-      - name: Check if version already published
-        id: version-check
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Detect release plan
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
         run: |
-          VERSION=$(python scripts/get-version.py)
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/khulnasoft/$VERSION/json")
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "Version $VERSION already exists on PyPI, skipping publish"
-            echo "should-publish=false" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$BASE_SHA"
+            force=false
           else
-            echo "Version $VERSION not found on PyPI, proceeding with publish"
-            echo "should-publish=true" >> $GITHUB_OUTPUT
+            base="$BEFORE_SHA"
+            force="$FORCE"
+            if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              base="HEAD^"
+            fi
+            if [ "$force" != "true" ]; then
+              force=false
+            fi
+          fi
+          if [ "$force" = "true" ]; then
+            uv run --frozen python scripts/publish.py detect \
+              --base "$base" --output "$RUNNER_TEMP/plan.json" --force
+          else
+            uv run --frozen python scripts/publish.py detect \
+              --base "$base" --output "$RUNNER_TEMP/plan.json"
           fi
 
-  publish:
-    needs: check-version
-    if: needs.check-version.outputs.should-publish == 'true'
+      - name: Upload release plan
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: release-plan
+          path: ${{ runner.temp }}/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    name: Build release packages
+    needs: detect
+    if: needs.detect.outputs.packages != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Download release plan
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: release-plan
+          path: ${{ runner.temp }}
+
+      - name: Build and verify packages
+        run: >-
+          uv run --frozen python scripts/publish.py build
+          --plan "$RUNNER_TEMP/plan.json"
+          --build-dir "$RUNNER_TEMP/build"
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: publish-packages
+          path: ${{ runner.temp }}/build
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-dry-run:
+    name: Publish dry run
+    needs: [detect, build]
+    if: >-
+      needs.detect.outputs.packages != '[]' &&
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Download release packages
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: publish-packages
+          path: ${{ runner.temp }}/build
+
+      - name: Verify publish
+        run: >-
+          uv run --frozen python scripts/publish.py publish
+          --plan "$RUNNER_TEMP/build/plan.json"
+          --build-dir "$RUNNER_TEMP/build"
+          --dry-run
+
+  publish:
+    name: Publish release
+    needs: [detect, build]
+    if: >-
+      needs.detect.outputs.packages != '[]' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.dry_run))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/p/khulnasoft
+      url: https://pypi.org/
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.14"
-      - uses: astral-sh/setup-uv@v3
-      - run: uv venv --python 3.14
-      - run: uv pip install build
-      - name: Create tag from version
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Download release packages
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: publish-packages
+          path: ${{ runner.temp }}/build
+
+      - name: Publish packages
+        id: publish
+        run: >-
+          uv run --frozen python scripts/publish.py publish
+          --plan "$RUNNER_TEMP/build/plan.json"
+          --build-dir "$RUNNER_TEMP/build"
+
+      - name: Create tags and GitHub releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ steps.publish.outputs.tags }}
+          RELEASE_BODIES: ${{ steps.publish.outputs.release-bodies }}
         run: |
-          VERSION=$(python scripts/get-version.py)
-          TAG="v$VERSION"
-          # Check if tag already exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping tag creation"
-          else
-            echo "Creating tag $TAG"
-            git config --local user.email "action@github.com"
-            git config --local user.name "GitHub Action"
-            git tag "$TAG"
-            git push origin "$TAG"
+          if [ -z "$TAGS" ]; then
+            echo "No tags to release."
+            exit 0
           fi
-      - name: Verify tag matches version
-        run: |
-          VERSION=$(python scripts/get-version.py)
-          TAG="v$VERSION"
-          echo "Verifying tag $TAG matches version $VERSION"
-      - name: Build
-        run: uv run python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            body="$RELEASE_BODIES/$tag.md"
+            if [ ! -f "$body" ]; then
+              echo "Missing release body for $tag" >&2
+              exit 1
+            fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag already exists."
+              continue
+            fi
+            gh release create "$tag" --title "$tag" --notes-file "$body"
+          done <<< "$TAGS"

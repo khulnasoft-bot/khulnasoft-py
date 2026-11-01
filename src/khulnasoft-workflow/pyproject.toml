@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-workflow"
+dynamic = ["version", "dependencies"]
+description = "Python SDK for Khulnasoft Workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "khulnasoft-internal-core>=0.2.0,<0.3.0",
+    "khulnasoft-headers>=0.6.0",
+    "khulnasoft-oidc>=0.8.0",
+    "khulnasoft-queue>=0.8.0",
+    "anyio>=4.0.0,<5",
+    "httpx2>=2",
+    "pydantic>=2.12.0,<3",
+    "semver>=3,<4",
+    "cbor2>=6.0,<7",
+    "cryptography>=43.0.0",
+    "zstandard>=0.23.0,<1 ; python_version < '3.14'",
+    "typing-extensions>=4.4.0,<5 ; python_version < '3.13'",
+    "tomli>=2,<3 ; python_version < '3.11'",
+]
+
+[tool.uv.sources]
+khulnasoft-internal-core = { workspace = true }
+khulnasoft-headers = { workspace = true }
+khulnasoft-oidc = { workspace = true }
+khulnasoft-queue = { workspace = true }
+
+[tool.hatch.version]
+path = "khulnasoft/workflow/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/workflow/**/*.py",
+    "/khulnasoft/workflow/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = ["/**/__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/khulnasoft/workflow"]
+exclude = ["/**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-workflow"
+explicit_package_bases = true
+packages = ["khulnasoft.workflow"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

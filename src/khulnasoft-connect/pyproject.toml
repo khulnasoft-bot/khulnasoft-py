@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-connect"
+dynamic = ["version", "dependencies"]
+description = "Python SDK for Khulnasoft Connect"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "khulnasoft-internal-core>=0.2.0,<0.3.0",
+    "khulnasoft-oidc[verify]>=0.8.0",
+    # HTTP goes through internal-core's transports, but `httpx2.Response` is part
+    # of this package's public surface (`ConnectApiError.response`) and is
+    # imported directly, so the bound is declared rather than inherited.
+    "httpx2>=2",
+    "pydantic>=2.7.0,<3",
+]
+
+[tool.uv.sources]
+khulnasoft-internal-core = { workspace = true }
+khulnasoft-oidc = { workspace = true }
+
+[tool.hatch.version]
+path = "khulnasoft/connect/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/connect/**/*.py",
+    "/khulnasoft/connect/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = ["/**/__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/khulnasoft/connect"]
+exclude = ["/**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys -m 'not live'"
+asyncio_mode = "auto"
+markers = ["live: requires live Connect API credentials"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-connect"
+explicit_package_bases = true
+packages = ["khulnasoft.connect"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

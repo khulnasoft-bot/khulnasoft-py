@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
-from .._telemetry.tracker import track
+from khulnasoft.internal.telemetry import track
 
 DEFAULT_API_BASE_URL = "https://api.khulnasoft.com"
 DEFAULT_TIMEOUT = 60.0
@@ -14,7 +14,7 @@ DEFAULT_TIMEOUT = 60.0
 def _require_token(token: str | None) -> str:
     resolved = token or os.getenv("KHULNASOFT_TOKEN")
     if not resolved:
-        raise RuntimeError("Missing KhulnaSoft API token. Pass token=... or set KHULNASOFT_TOKEN.")
+        raise RuntimeError("Missing Khulnasoft API token. Pass token=... or set KHULNASOFT_TOKEN.")
     return resolved
 
 
@@ -172,7 +172,7 @@ def upload_file(
         headers["x-now-size"] = str(x_now_size)
 
     with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
-        resp = client.post(url, params=params, content=bytes(content), headers=headers)
+        resp = client.post(url, params=params, content=content, headers=headers)
     if not (200 <= resp.status_code < 300):
         try:
             data = resp.json()
@@ -197,7 +197,7 @@ async def upload_file_async(
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Upload a single deployment file to KhulnaSoft (async)."""
+    """Upload a single deployment file to Khulnasoft (async)."""
     params: dict[str, Any] = {}
     if team_id:
         params["teamId"] = team_id
@@ -220,7 +220,7 @@ async def upload_file_async(
         headers["x-now-size"] = str(x_now_size)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-        resp = await client.post(url, params=params, content=bytes(content), headers=headers)
+        resp = await client.post(url, params=params, content=content, headers=headers)
     if not (200 <= resp.status_code < 300):
         try:
             data = resp.json()

@@ -1,0 +1,18 @@
+# Packages imported into the workspace with versions from a prior release
+# stream. The new-package version guard skips these names. Remove this file
+# after the migration release so future additions must start at 0.0.0.
+
+khulnasoft
+khulnasoft-apscheduler
+khulnasoft-cache
+khulnasoft-celery
+khulnasoft-connect
+khulnasoft-django-tasks
+khulnasoft-dramatiq
+khulnasoft-headers
+khulnasoft-internal-core
+khulnasoft-internal-telemetry
+khulnasoft-oidc
+khulnasoft-queue
+khulnasoft-sandbox
+khulnasoft-workflow

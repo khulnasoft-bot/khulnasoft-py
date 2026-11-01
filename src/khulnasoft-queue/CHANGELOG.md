@@ -1,0 +1,64 @@
+# Changelog
+
+## 0.9.0 - 2026-09-14
+
+### Breaking Changes
+
+- Remove the `asgi_app`, `QueueClientAsgiApp`, `QueueClient.asgi_app()`,
+  `QueueClientAsgiDevServer`, and `queue_client_asgi_dev_server` APIs. Deploy
+  queue handlers with `[[tool.khulnasoft.subscribers]]` declarations instead. (#309)
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the client factory. (#356)
+
+### Internal
+
+- Require `khulnasoft-internal-core>=0.2.0,<0.3.0` for the coordinated `httpx2` release.
+
+## 0.8.1 - 2026-09-01
+
+### Bug Fixes
+
+- Force embedded development servers to exit when graceful shutdown stalls. (#351)
+
+### Documentation
+
+- Remove documentation and examples for `asgi_app` in preparation for its removal. (#309)
+
+## 0.8.0 - 2026-08-12
+
+### Features
+
+- Add `TopicPattern` for subscribing to several topics at once, and use a transport attached to a `Topic` or `TopicPattern` to decode that subscription's deliveries. (#266)
+- Allow custom queue transports to validate decoded subscriber payloads without requiring annotation-based Pydantic validation. (#281)
+
+## 0.7.3 - 2026-08-07
+
+### Internal
+
+- Take `typeutils` from `khulnasoft._internal.core` rather than carrying a private copy. Adds a dependency on `khulnasoft-internal-core`. (#261)
+
+## 0.7.2 - 2026-07-31
+
+### Bug Fixes
+
+- Don't require `KHULNASOFT_DEPLOYMENT_ID` to be set when running against a `khulnasoft dev` queue broker. (#211)
+- This will allow us to revert `vc dev` setting `KHULNASOFT_DEPLOYMENT_ID`. (#211)
+
+## 0.7.1 - 2026-07-16
+
+- No changes.
+
+## 0.7.0 - 2026-07-13
+
+### Features
+
+- Initial release (#158) (#172)
+
+### Bug Fixes
+
+- Stop nesting retry wrappers in delivery lifecycle settlement: the RetryAfter (#175)
+- and ACK paths wrapped the already-retrying `extend_lease()`/`acknowledge()` (#175)
+- client methods in a second retry layer, multiplying retry attempts and (#175)
+- logging duplicate `visibility.retry_attempt` events per request. (#175)

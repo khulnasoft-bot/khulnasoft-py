@@ -5,8 +5,8 @@ authors:
   - given-names: "khulnasoft"
     family-names: ""
     email: "161459699+khulnasoft@users.noreply.github.com"
-version: 0.3.0
-date-released: "2026-10-23"
+version: 0.11.4
+date-released: "2026-10-25"
 license: "MIT"
 repository-code: "https://github.com/khulnasoft/khulnasoft-sdk"
 url: "https://github.com/khulnasoft/khulnasoft-sdk"

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Comparison example showing both sync and async KhulnaSoft Projects API usage.
+Comparison example showing both sync and async Khulnasoft Projects API usage.
 
 This example demonstrates the differences between sync and async approaches
 by performing the same operations with both methods and comparing performance.
 
 Requirements:
-- KHULNASOFT_TOKEN environment variable set
+- KHULNASOFT_TOKEN or KHULNASOFT_OIDC_TOKEN environment variable set
 - Optional: KHULNASOFT_TEAM_ID for team-scoped operations
 
 Usage:
@@ -31,7 +31,7 @@ from khulnasoft.projects.aio import (
 load_dotenv()
 
 
-async def async_operations(team_id: str | None = None) -> tuple[str, float]:
+async def async_operations(token: str, team_id: str | None = None) -> tuple[str, float]:
     """Perform async operations and return project ID and duration."""
     start_time = time.time()
     project_id = None
@@ -45,6 +45,7 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
                 "framework": "nextjs",
                 "publicSource": False,
             },
+            token=token,
             team_id=team_id,
         )
         project_id = create_response.get("id")
@@ -56,16 +57,17 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
                 "framework": "nextjs",
                 "buildCommand": "npm run build",
             },
+            token=token,
             team_id=team_id,
         )
 
         # List projects
-        await get_projects_async(team_id=team_id)
+        await get_projects_async(token=token, team_id=team_id)
     finally:
         # Delete project if it was created
         if project_id:
             try:
-                await delete_project_async(project_id, team_id=team_id)
+                await delete_project_async(project_id, token=token, team_id=team_id)
             except Exception:
                 # Silently ignore cleanup errors
                 pass
@@ -74,7 +76,7 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
     return project_id, duration
 
 
-def sync_operations(team_id: str | None = None) -> tuple[str, float]:
+def sync_operations(token: str, team_id: str | None = None) -> tuple[str, float]:
     """Perform sync operations and return project ID and duration."""
     start_time = time.time()
     project_id = None
@@ -88,6 +90,7 @@ def sync_operations(team_id: str | None = None) -> tuple[str, float]:
                 "framework": "nextjs",
                 "publicSource": False,
             },
+            token=token,
             team_id=team_id,
         )
         project_id = create_response.get("id")
@@ -99,16 +102,17 @@ def sync_operations(team_id: str | None = None) -> tuple[str, float]:
                 "framework": "nextjs",
                 "buildCommand": "npm run build",
             },
+            token=token,
             team_id=team_id,
         )
 
         # List projects
-        get_projects(team_id=team_id)
+        get_projects(token=token, team_id=team_id)
     finally:
         # Delete project if it was created
         if project_id:
             try:
-                delete_project(project_id, team_id=team_id)
+                delete_project(project_id, token=token, team_id=team_id)
             except Exception:
                 # Silently ignore cleanup errors
                 pass
@@ -119,14 +123,16 @@ def sync_operations(team_id: str | None = None) -> tuple[str, float]:
 
 async def main() -> None:
     """Compare sync vs async performance."""
-    print("🚀 KhulnaSoft Projects API - Sync vs Async Comparison")
+    print("🚀 Khulnasoft Projects API - Sync vs Async Comparison")
     print("=" * 60)
 
     # Check if we have a token
-    token = os.getenv("KHULNASOFT_TOKEN")
+    token = os.getenv("KHULNASOFT_TOKEN") or os.getenv("KHULNASOFT_OIDC_TOKEN")
     if not token:
-        print("❌ Error: KHULNASOFT_TOKEN environment variable is required")
-        print("   Set it with: export KHULNASOFT_TOKEN=your_token_here")
+        print(
+            "❌ Error: KHULNASOFT_TOKEN or KHULNASOFT_OIDC_TOKEN environment variable is required"
+        )
+        print("   Set it with: export KHULNASOFT_OIDC_TOKEN=your_token_here")
         return
 
     team_id = os.getenv("KHULNASOFT_TEAM_ID")
@@ -137,11 +143,11 @@ async def main() -> None:
 
     try:
         print("\n🔄 Running async operations...")
-        async_project_id, async_duration = await async_operations(team_id)
+        async_project_id, async_duration = await async_operations(token, team_id)
         print(f"   ✅ Async operations completed in {async_duration:.2f} seconds")
 
         print("\n🔄 Running sync operations...")
-        sync_project_id, sync_duration = sync_operations(team_id)
+        sync_project_id, sync_duration = sync_operations(token, team_id)
         print(f"   ✅ Sync operations completed in {sync_duration:.2f} seconds")
 
         print("\n📊 Performance Comparison:")
@@ -168,7 +174,9 @@ async def main() -> None:
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
-        print("   Make sure your KHULNASOFT_TOKEN is valid and has the necessary permissions")
+        print(
+            "   Make sure your KHULNASOFT_TOKEN or KHULNASOFT_OIDC_TOKEN is valid and has the necessary permissions"
+        )
         return
 
 

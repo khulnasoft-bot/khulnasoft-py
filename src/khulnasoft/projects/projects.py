@@ -4,9 +4,9 @@ import os
 import urllib.parse
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
-from .._telemetry.tracker import track
+from khulnasoft.internal.telemetry import track
 
 __all__ = [
     "get_projects",
@@ -24,7 +24,7 @@ def _require_token(token: str | None) -> str:
     env_token = os.getenv("KHULNASOFT_TOKEN")
     resolved = token or env_token
     if not resolved:
-        raise RuntimeError("Missing KhulnaSoft API token. Pass token=... or set KHULNASOFT_TOKEN.")
+        raise RuntimeError("Missing Khulnasoft API token. Pass token=... or set KHULNASOFT_TOKEN.")
     return resolved
 
 
@@ -93,7 +93,7 @@ def get_projects(
     """Retrieve a list of projects.
 
     Parameters:
-    - token: KhulnaSoft API token (defaults to env KHULNASOFT_TOKEN)
+    - token: Khulnasoft API token (defaults to env KHULNASOFT_TOKEN)
     - team_id: optional team to scope the query (maps to teamId)
     - slug: optional team slug (maps to slug)
     - query: additional query params (e.g. search, limit, repo, from, etc.)
@@ -141,7 +141,7 @@ async def get_projects_async(
     """Retrieve a list of projects.
 
     Parameters:
-    - token: KhulnaSoft API token (defaults to env KHULNASOFT_TOKEN)
+    - token: Khulnasoft API token (defaults to env KHULNASOFT_TOKEN)
     - team_id: optional team to scope the query (maps to teamId)
     - slug: optional team slug (maps to slug)
     - query: additional query params (e.g. search, limit, repo, from, etc.)
@@ -269,7 +269,7 @@ def update_project(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Update an existing project by id or name."""
     params: dict[str, Any] = {}

@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-cache"
+dynamic = ["version", "dependencies"]
+description = "Runtime cache helpers for Khulnasoft Python applications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "httpx2>=2",
+    "khulnasoft-headers>=0.6.0",
+    "khulnasoft-internal-telemetry>=0.6.0",
+]
+
+[tool.uv.sources]
+khulnasoft-headers = { workspace = true }
+khulnasoft-internal-telemetry = { workspace = true }
+
+[tool.hatch.version]
+path = "khulnasoft/cache/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/cache/**/*.py",
+    "/khulnasoft/cache/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/khulnasoft/cache",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-cache"
+explicit_package_bases = true
+packages = ["khulnasoft.cache"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

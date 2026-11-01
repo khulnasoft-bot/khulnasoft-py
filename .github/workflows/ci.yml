@@ -5,101 +5,140 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   lint-test-and-build:
     name: lint-test-and-build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: ci
     env:
+      UV_PYTHON: "3.12"
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       KHULNASOFT_PROJECT_ID: ${{ secrets.KHULNASOFT_PROJECT_ID }}
       KHULNASOFT_TEAM_ID: ${{ secrets.KHULNASOFT_TEAM_ID }}
       KHULNASOFT_TOKEN: ${{ secrets.KHULNASOFT_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: Set up virtualenv (Python 3.12)
-        run: uv venv --python 3.12
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: Install dependencies
-        run: uv pip install -e .[dev]
+        run: uv sync --all-packages --frozen --python 3.12
 
-      - name: Lint
+      - name: Lint and typecheck
         run: |
-          # The CI ensures that the code is formatted and complain if not.
-          # It's on US to commit already formatted clean code.
-          uv run ruff check
+          uv run --frozen poe lint
+          uv run --frozen poe typecheck
 
-      - name: Typecheck
-        run: |
-          uv run mypy src
-          uv run python -c "import khulnasoft, khulnasoft.cache, khulnasoft.headers, khulnasoft.oidc, khulnasoft.sandbox"
+      - name: Check type-ignore baseline
+        run: uv run --frozen poe type-ignores
 
-      - name: Run tests
-        run: uv run pytest -v --capture=tee-sys --ignore=tests/test_examples.py
+      - name: Check news fragments
+        run: uv run --frozen poe check-news-fragments
 
-      - name: Run example tests
-        run: uv run pytest -v --capture=tee-sys tests/test_examples.py -n auto
+      - name: Test with coverage
+        run: uv run --frozen poe coverage
 
-      - run: mkdir coverage
-      - name: Test
-        run: uv run --no-sync bash scripts/test-cov.sh $PYTEST_OPTIONS
-        env:
-          COVERAGE_FILE: coverage/.coverage.${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.deprecated-tests}}
-          CONTEXT: ${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.deprecated-tests}}
-          PYTEST_OPTIONS: ${{ (matrix.without-httpx2 == 'true') && '-W ignore::UserWarning' || '' }}
+      - name: Upload coverage
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
 
-      - name: Build package
-        run: uv run python -m build
+      - name: Build all packages
+        run: uv build --all-packages --no-sources
 
-  test:
-    name: test
+  test-matrix:
+    name: test (Python ${{ matrix.python-version }})
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    environment: ci
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Detect changed test files
-        id: changed-tests
-        run: |
-          echo "Checking for changed test files..."
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          else
-            BASE_SHA="${{ github.event.before }}"
-          fi
-          CHANGED_FILES=$(git diff --name-only "$BASE_SHA"...HEAD -- 'tests/**' 'src/**')
-          if echo "$CHANGED_FILES" | grep -q '^tests/'; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Python
-        if: steps.changed-tests.outputs.found == 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version-file: "base/.python-version"
-
-      - name: Setup uv
-        if: steps.changed-tests.outputs.found == 'true'
+      - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "latest-known"
-          enable-cache: true
 
       - name: Install dependencies
-        if: steps.changed-tests.outputs.found == 'true'
-        run: uv pip install -e .[dev]
+        run: uv sync --all-packages --frozen --python ${{ matrix.python-version }}
 
-      - name: Run tests
-        if: steps.changed-tests.outputs.found == 'true'
-        run: uv run --no-sync bash scripts/test.sh -v --capture=tee-sys --ignore=tests/test_examples.py
+      - name: Test
+        run: uv run --frozen --python ${{ matrix.python-version }} poe test
+
+  examples:
+    name: examples
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ci
+    env:
+      UV_PYTHON: "3.12"
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      KHULNASOFT_PROJECT_ID: ${{ secrets.KHULNASOFT_PROJECT_ID }}
+      KHULNASOFT_TEAM_ID: ${{ secrets.KHULNASOFT_TEAM_ID }}
+      KHULNASOFT_TOKEN: ${{ secrets.KHULNASOFT_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Run examples
+        run: uv run --frozen poe test-examples
+
+  audit:
+    name: audit
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Audit dependencies
+        run: uv run --frozen pip-audit --skip-editable
+
+      - name: Export SBOM
+        run: >-
+          uv export --format cyclonedx1.5 --all-packages --no-hashes
+          --output-file sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sbom
+          path: sbom.json
+          if-no-files-found: error

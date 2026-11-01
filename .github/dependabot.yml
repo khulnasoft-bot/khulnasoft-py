@@ -34,6 +34,8 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -42,6 +44,12 @@ updates:
       day: "monday"
       time: "04:00"
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "github-actions"
+    cooldown:
+      default-days: 7

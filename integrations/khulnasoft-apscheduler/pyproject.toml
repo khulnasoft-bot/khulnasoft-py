@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-apscheduler"
+dynamic = ["version"]
+description = "APScheduler integration for Khulnasoft Queues"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "APScheduler>=3.10.4,<4",
+    "khulnasoft-cache>=0.7.1",
+    "khulnasoft-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+khulnasoft-cache = { workspace = true }
+khulnasoft-queue = { workspace = true }
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = [
+    "D",
+    "INP001",
+    "T201",
+]
+"tests/**/*.py" = [
+    "D",
+    "S101",
+    "SLF001",
+    "PLC2701",
+]
+"khulnasoft/integrations/apscheduler/_adapter.py" = [
+    "BLE001",  # APScheduler itself treats job store/executor failures broadly.
+    "FBT001",  # patched APScheduler signatures must match upstream.
+    "FBT002",  # patched APScheduler signatures must match upstream.
+    "N806",  # scheduler class names imported lazily mirror upstream names.
+    "PLR0904",  # adapter intentionally owns one scheduler's full integration lifecycle.
+    "PLC0415",  # optional scheduler classes are imported only when patching.
+    "SLF001",  # integration relies on APScheduler private extension points.
+    "TRY400",  # executor lookup failure is logged with APScheduler context.
+]
+"khulnasoft/integrations/apscheduler/_automatic.py" = [
+    "PLC0415",  # runtime-only imports avoid a hard runtime dependency and an adapter cycle.
+]
+"khulnasoft/integrations/apscheduler/_backends/cache/*.py" = [
+    "S301",  # job persistence mirrors upstream APScheduler's pickle format.
+    "S311",  # jitter for write retries is not cryptographic.
+    "S403",  # job persistence mirrors upstream APScheduler's pickle format.
+    "SLF001",  # store/coordinator coupling relies on APScheduler private hooks.
+]
+"khulnasoft/integrations/apscheduler/_backends/cache/_driver.py" = [
+    "PLR0904",  # the Driver protocol dictates the full public surface.
+]
+"khulnasoft/integrations/apscheduler/_backends/__init__.py" = [
+    "PLC0415",  # only the selected backend imports, so its transitive deps load once.
+    "SLF001",  # autodetection reads the scheduler's private job-store registry.
+]
+"khulnasoft/integrations/apscheduler/_executor.py" = [
+    "BLE001",  # mirrors APScheduler BaseExecutor error handling.
+    "S101",  # mirrors APScheduler executor invariants.
+    "SLF001",  # APScheduler job metadata is private.
+    "TID251",  # async job support needs stdlib event-loop detection.
+]
+"khulnasoft/integrations/apscheduler/_imports.py" = [
+    "PLW0717",  # grouped optional APScheduler import guard.
+]
+"khulnasoft/integrations/apscheduler/_payload.py" = [
+    "TRY004",  # payload parse failures are reported uniformly as ValueError.
+]
+"khulnasoft/integrations/apscheduler/version.py" = [
+    "D100",
+]
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "khulnasoft/integrations/apscheduler/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/khulnasoft/integrations/apscheduler/**/*.py",
+    "/khulnasoft/integrations/apscheduler/py.typed",
+    "/README.md",
+    "/SCHEDULER.md",
+    "/examples/**/*.md",
+    "/examples/**/*.py",
+    "/examples/**/*.json",
+    "/examples/**/*.toml",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/khulnasoft/integrations/apscheduler",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1

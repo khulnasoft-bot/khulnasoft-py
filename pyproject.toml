@@ -1,67 +1,127 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "khulnasoft"
-version = "0.3.0"
-description = "Python SDK for KhulnaSoft"
-readme = "README.md"
-requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE", "LICENSE.*"]
-dependencies = [
-    "httpx>=0.27.0",
-    "pydantic>=2.14.1",
-    "anyio>=4.0.0",
-    "python-dotenv",
-    "websockets>=16.1.1",
-]
-
-[project.scripts]
-khulnasoft = "khulnasoft.__main__:main"
-khulnasoft-sandbox = "khulnasoft.sandbox.__main__:main"
-sandbox = "khulnasoft.sandbox.__main__:main"
+requires = []
+build-backend = "no_root_build"
+backend-path = ["scripts"]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.17.1",
-    "pytest>=9.1.1",
-    "pytest-asyncio",
-    "pytest-xdist",
-    "mypy",
-    "build",
-    "twine",
-    "pytest-cov>=7.1.0",
-    "pre-commit>=4.6.2",
+    "ruff==0.15.20",
+    "pytest>=7.0.0,<10",
+    "pytest-asyncio<2",
+    "pytest-cov>=6,<8",
+    "pytest-xdist<4",
+    "coverage>=7,<8",
+    # Runtime-only migration compatibility; never included in release metadata.
+    "httpx==0.28.1",
+    "fastapi>=0.115.0,<1",
+    "uvicorn>=0.30.0,<1",
+    "hypothesis>=6.0.0,<7",
+    "cryptography>=48.0.1",
+    "uvloop<1; sys_platform != 'win32'",
+    "mypy>=1.20.2,<2",
+    "django-stubs>=6.0.6,<7",
+    "build<2",
+    "twine<7",
+    "ty==0.0.55",
+    "zizmor>=1.24.1,<2",
+    "hatchling>=1.27.0,<2",
+    "time-machine>=2.16,<3",
+    "textual>=8.0.0,<9",
+    "trio>=0.33.0,<1",
+    "poethepoet>=0.48.0",
+    "pip-audit>=2.7,<3",
+    "pre-commit>=4.0.0,<5",
+    "tox>=4",
+    "tox-uv-bare",
+    "tomli>=2.0.0,<3; python_version < '3.11'",
+    "vendoring>=1,<2",
+    "lograil~=0.8.1",
+    "ggt>=1.6.0; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
-package = true
+package = false
+exclude-newer = "2 days"
+exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00:00:00Z" }
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["khulnasoft*"]
-namespaces = true
+[tool.uv.workspace]
+members = ["src/*", "integrations/*"]
 
-[tool.setuptools]
-include-package-data = false
+[tool.vendoring]
+destination = "vendor/"
+requirements = "vendor/vendor.txt"
+namespace = "vendor"
+protected-files = ["__init__.py", "vendor.txt"]
 
-[tool.setuptools.package-data]
-khulnasoft = ["py.typed"]
+[tool.vendoring.transformations]
+substitute = [
+    { match = "(?m)^import httpcore$", replace = "import httpcore2 as httpcore" },
+    { match = "(?m)^import httpx$", replace = "import httpx2 as httpx" },
+    { match = "(?m)^from httpx import ", replace = "from httpx2 import " },
+    { match = "\"httpx\\.", replace = "\"httpx2." },
+    { match = "\"httpcore\\.", replace = "\"httpcore2." },
+    { match = 'from \.__version__ import __version__', replace = "# Vendored from respx 0.23.1 and ported to httpx2/httpcore2.\nfrom .__version__ import __version__" },
+]
+drop = ["*.dist-info"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+pythonpath = ["."]
+addopts = "--no-header --capture=tee-sys"
 asyncio_mode = "auto"
+markers = [
+    "live: requires live API credentials (KHULNASOFT_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
+]
+
+[tool.tox]
+requires = ["tox>=4", "tox-uv-bare"]
+env_list = ["py310", "py311", "py312", "py313", "py314"]
+
+[tool.tox.env_run_base]
+runner = "uv-venv-lock-runner"
+package = "skip"
+dependency_groups = ["dev"]
+allowlist_externals = ["./scripts/test.sh"]
+uv_sync_flags = ["--all-packages"]
+commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 
 [tool.mypy]
+python_version = "3.10"
+plugins = ["pydantic.mypy"]
+cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
+check_untyped_defs = true
 ignore_missing_imports = true
+explicit_package_bases = true
+mypy_path = [
+    "src",
+    "src/khulnasoft-cache",
+    "src/khulnasoft-connect",
+    "src/khulnasoft-headers",
+    "src/khulnasoft-queue",
+    "src/khulnasoft-oidc",
+    "src/khulnasoft-internal-core",
+    "src/khulnasoft-internal-telemetry",
+    "src/khulnasoft-sandbox",
+    "src/khulnasoft-workflow",
+    "integrations/khulnasoft-apscheduler",
+    "integrations/khulnasoft-celery",
+    "integrations/khulnasoft-django-tasks",
+    "integrations/khulnasoft-dramatiq",
+    "tests/stubs",
+]
+
+[tool.ty.environment]
+python-version = "3.10"
+root = ["./src", "./integrations"]
+
+[tool.ty.src]
+exclude = ["**/_khulnasoft_hatch_build.py"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["vendor", "_khulnasoft_hatch_build.py"]
 
 [tool.ruff.lint]
 select = [
@@ -72,6 +132,7 @@ select = [
     "B",  # flake8-bugbear
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
+    "BLE001", # blanket except
 ]
 isort = { combine-as-imports = true, known-first-party = ["khulnasoft"] }
 
@@ -79,4 +140,169 @@ isort = { combine-as-imports = true, known-first-party = ["khulnasoft"] }
 keep-runtime-typing = false
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["E501"]
+"examples/**/*.py" = ["E501", "BLE001"]
+"**/tests/**/*.py" = ["BLE001"]
+"src/khulnasoft-internal-core/khulnasoft/_internal/core/http/transport.py" = ["BLE001"]
+"src/khulnasoft-internal-core/khulnasoft/_internal/core/session.py" = ["BLE001"]
+"src/khulnasoft-internal-telemetry/khulnasoft/internal/telemetry/tracker.py" = ["BLE001"]
+"src/khulnasoft-internal-telemetry/khulnasoft/internal/telemetry/credentials.py" = ["BLE001"]
+"src/khulnasoft-internal-telemetry/khulnasoft/internal/telemetry/client.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/runtime.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/signature_codec.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/worlds/khulnasoft.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/worlds/local.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/serialization.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/run.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/errors.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/error_serde.py" = ["BLE001"]
+"src/khulnasoft-workflow/khulnasoft/workflow/_internal/cli.py" = ["BLE001"]
+"src/khulnasoft-cache/khulnasoft/cache/cache_build.py" = ["BLE001"]
+"src/khulnasoft/projects/projects.py" = ["BLE001"]
+"src/khulnasoft/deployments/deployments.py" = ["BLE001"]
+"src/khulnasoft/_internal/blob/__init__.py" = ["BLE001"]
+"src/khulnasoft/_internal/blob/core.py" = ["BLE001"]
+"src/khulnasoft-sandbox/khulnasoft/sandbox/_internal/filesystem_handle_core.py" = ["BLE001"]
+"src/khulnasoft-sandbox/khulnasoft/sandbox/_internal/sync_runtime.py" = ["BLE001"]
+"src/khulnasoft-sandbox/khulnasoft/sandbox/_internal/sync_filesystem_handle.py" = ["BLE001"]
+"src/khulnasoft-sandbox/khulnasoft/sandbox/_internal/async_runtime.py" = ["BLE001"]
+"src/khulnasoft-sandbox/khulnasoft/sandbox/_internal/async_filesystem_handle.py" = ["BLE001"]
+"src/khulnasoft-oidc/khulnasoft/oidc/utils.py" = ["BLE001"]
+"src/khulnasoft-oidc/khulnasoft/oidc/token.py" = ["BLE001"]
+"src/khulnasoft-oidc/khulnasoft/oidc/credentials.py" = ["BLE001"]
+"src/khulnasoft-connect/khulnasoft/connect/_internal/identity.py" = ["BLE001"]
+
+[tool.poe]
+include = "scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.coverage.run]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+skip_empty = true
+include = ["*/khulnasoft/*"]
+
+[tool.poe.tasks.setup]
+sequence = ["sync-githooks"]
+
+[tool.poe.tasks.sync-githooks]
+cmd = "python scripts/sync-githooks.py"
+
+[tool.poe.tasks.clean]
+cmd = "python scripts/clean.py"
+
+[tool.poe.tasks.check-news-fragments]
+cmd = "scripts/poe/workspace_poe.py root-task check-news-fragments-root"
+
+[tool.poe.tasks.check-news-fragments-root]
+cmd = "python scripts/release.py check-news-fragments"
+
+[tool.poe.tasks.check-new-package-versions]
+cmd = "scripts/poe/workspace_poe.py root-task check-new-package-versions-root"
+
+[tool.poe.tasks.check-new-package-versions-root]
+cmd = "python scripts/release.py check-new-package-versions"
+
+[tool.poe.tasks.fix]
+cmd = "scripts/poe/workspace_poe.py workspace fix --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.fix-root]
+cmd = "scripts/poe/workspace_poe.py root-task fix-root"
+
+[tool.poe.tasks.pre-commit]
+cmd = "scripts/poe/workspace_poe.py hook pre-commit"
+
+[tool.poe.tasks.pre-push]
+cmd = "scripts/poe/workspace_poe.py hook pre-push"
+
+[tool.poe.tasks.lint]
+cmd = "scripts/poe/workspace_poe.py workspace lint --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.lint-root]
+cmd = "scripts/poe/workspace_poe.py root-task lint-root"
+
+[tool.poe.tasks.lint-zizmor]
+cmd = "zizmor --offline ."
+
+[tool.poe.tasks.lint-towncrier]
+cmd = "python scripts/release.py lint-towncrier"
+
+[tool.poe.tasks.release-status]
+cmd = "python scripts/release.py status"
+
+[tool.poe.tasks.release]
+shell = """
+set --
+if [ -n "${force_bump:-}" ]; then
+  set -- "$@" --force-bump "$force_bump"
+fi
+python scripts/release.py release "$@"
+"""
+args = [{ name = "force_bump", options = ["--force-bump"] }]
+
+[tool.poe.tasks.changelog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
+
+[tool.poe.tasks.clog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
+
+[tool.poe.tasks.dist]
+cmd = "./scripts/build.sh"
+
+[tool.poe.tasks.typecheck]
+cmd = "scripts/poe/workspace_poe.py workspace typecheck --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.typecheck-root]
+cmd = "scripts/poe/workspace_poe.py root-task typecheck-root"
+
+[tool.poe.tasks.typecheck-mypy]
+cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-tests}"
+
+[tool.poe.tasks.test]
+cmd = "scripts/poe/workspace_poe.py workspace test --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.test-root]
+cmd = "scripts/poe/workspace_poe.py root-task test-root"
+
+[tool.poe.tasks.coverage]
+cmd = "python scripts/coverage.py"
+
+[tool.poe.tasks.type-ignores]
+cmd = "python scripts/check_type_ignores.py"
+
+[tool.poe.tasks.test-examples]
+cmd = "scripts/poe/workspace_poe.py workspace test-examples --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.test-examples-root]
+cmd = "scripts/poe/workspace_poe.py root-task test-examples-root"
+
+[tool.poe.tasks.qa]
+cmd = "scripts/poe/workspace_poe.py qa --poe-quiet ${quiet} --poe-verbose ${verbose} ${scopes}"
+args = [
+  { name = "quiet", options = ["-q", "--quiet"], type = "boolean" },
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]

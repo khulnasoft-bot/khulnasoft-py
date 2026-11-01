@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-celery"
+dynamic = ["version", "dependencies"]
+description = "Celery integration for Khulnasoft Queue and Runtime Cache"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "celery>=5.3,<6",
+    "httpx2>=2",
+    "khulnasoft-cache>=0.6.0",
+    "khulnasoft-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+khulnasoft-cache = { workspace = true }
+khulnasoft-queue = { workspace = true }
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "khulnasoft/integrations/celery/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/integrations/celery/**/*.py",
+    "/khulnasoft/integrations/celery/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/khulnasoft/integrations/celery",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-celery"
+explicit_package_bases = true
+packages = ["khulnasoft.integrations.celery"]
+
+[[tool.mypy.overrides]]
+module = ["celery", "celery.*", "kombu", "kombu.*"]
+ignore_missing_imports = true

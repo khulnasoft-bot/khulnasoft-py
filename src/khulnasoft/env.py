@@ -52,7 +52,7 @@ def _get(env: Mapping[str, str], key: str) -> str | None:
 
 
 def get_env(env: Mapping[str, str] | None = None) -> Env:
-    """Return KhulnaSoft system environment variables.
+    """Return Khulnasoft system environment variables.
 
     Empty strings are normalized to ``None``. Returns an immutable ``Env``
     dataclass that supports both attribute access (e.g. ``ev.KHULNASOFT_URL``)

@@ -1,0 +1,187 @@
+#!/usr/bin/env python
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+
+FALSE_VALUES = {"0", "false", "no"}
+TRUE_VALUES = {"1", "true", "yes"}
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def enabled(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in FALSE_VALUES
+
+
+def split_env(name: str) -> list[str]:
+    value = os.environ.get(name, "")
+    return shlex.split(value) if value else []
+
+
+def has_option(
+    args: Iterable[str],
+    *,
+    flags: set[str],
+    prefixes: tuple[str, ...],
+) -> bool:
+    return any(arg in flags or arg.startswith(prefixes) for arg in args)
+
+
+def has_mypy_target(args: Sequence[str]) -> bool:
+    takes_value = False
+    for arg in args:
+        if takes_value:
+            takes_value = False
+            continue
+        if arg in {"--cache-dir", "--config-file", "--python-version"}:
+            takes_value = True
+        elif arg.startswith(("--cache-dir=", "--config-file=", "--python-version=")):
+            continue
+        elif not arg.startswith("--"):
+            return True
+    return False
+
+
+def drop_duplicate_args(scope_args: list[str], extra_args: list[str]) -> list[str]:
+    size = len(extra_args)
+    if not size or len(scope_args) < size:
+        return extra_args
+    if any(
+        scope_args[index : index + size] == extra_args
+        for index in range(len(scope_args) - size + 1)
+    ):
+        return []
+    return extra_args
+
+
+def pytest_command() -> tuple[list[str], str]:
+    selected = os.environ.get("WORKSPACE_POE_TEST_RUNNER")
+    force_pytest = os.environ.get("FORCE_PYTEST", "").lower() in TRUE_VALUES
+    if selected == "ggt" or (selected != "pytest" and not force_pytest and shutil.which("ggt")):
+        command = ["ggt"]
+        runner = "ggt"
+    else:
+        command = ["pytest"]
+        runner = "pytest"
+    if runner == "ggt" and os.environ.get("WORKSPACE_POE_LOGRAIL_PROGRESS") == "1":
+        command.extend(("--output-format", "json"))
+    return command, runner
+
+
+def build_command(task_name: str, argv: Sequence[str]) -> list[str]:
+    test_runner: str | None = None
+    if task_name == "pytest":
+        command, test_runner = pytest_command()
+    else:
+        commands = {
+            "ruff-check": ["ruff", "check"],
+            "ruff-check-fix": ["ruff", "check", "--fix"],
+            "ruff-format": ["ruff", "format", "--check"],
+            "ruff-format-fix": ["ruff", "format"],
+            "ty": ["ty", "check"],
+            "mypy": ["mypy"],
+        }
+        try:
+            command = commands[task_name]
+        except KeyError:
+            raise SystemExit(f"unsupported poe tool wrapper: {task_name}") from None
+
+    extra_args = split_env("POE_EXTRA_ARGS")
+    if extra_args[:1] == ["--"]:
+        extra_args.pop(0)
+    scope_args = list(argv)
+
+    if task_name.startswith("ruff-"):
+        os.environ.setdefault("RUFF_CACHE_DIR", str(WORKSPACE_ROOT / ".ruff_cache"))
+
+    if task_name == "mypy":
+        all_args = [*scope_args, *extra_args]
+        if not has_option(
+            all_args,
+            flags={"--config-file"},
+            prefixes=("--config-file=",),
+        ):
+            scope_args[:0] = [
+                "--config-file",
+                str(WORKSPACE_ROOT / "pyproject.toml"),
+            ]
+        if not has_option(
+            all_args,
+            flags={"--cache-dir"},
+            prefixes=("--cache-dir=",),
+        ):
+            package = os.environ.get("WORKSPACE_POE_PACKAGE")
+            if not package:
+                package = "root" if Path.cwd().resolve() == WORKSPACE_ROOT else Path.cwd().name
+            scope_args[:0] = [
+                "--cache-dir",
+                str(WORKSPACE_ROOT / ".mypy_cache" / package),
+            ]
+
+    if not scope_args:
+        scope_args = split_env("WORKSPACE_POE_SCOPE_ARGS")
+
+    if task_name == "mypy" and not has_mypy_target(scope_args):
+        scope_args.extend(split_env("WORKSPACE_POE_SCOPE_ARGS") or ["."])
+
+    if task_name == "pytest":
+        all_args = [*scope_args, *extra_args]
+        has_workers = has_option(
+            all_args,
+            flags={"-n", "--numprocesses", "-j", "--jobs"},
+            prefixes=("-n", "--numprocesses=", "-j", "--jobs="),
+        )
+        has_verbosity = has_option(
+            all_args,
+            flags={"-q", "--quiet", "-v", "--verbose"},
+            prefixes=("-q", "-v"),
+        )
+        parallel = enabled("WORKSPACE_POE_PARALLEL", default=True) or enabled(
+            "WORKSPACE_POE_PYTEST_XDIST", default=False
+        )
+        if (
+            not has_verbosity
+            and os.environ.get("WORKSPACE_POE_LOGRAIL_PROGRESS") == "1"
+            and test_runner == "pytest"
+        ):
+            scope_args.insert(0, "-v")
+        if not has_workers:
+            if test_runner == "pytest" and parallel:
+                scope_args[:0] = ["-n", "auto"]
+            elif test_runner == "ggt" and not parallel:
+                scope_args[:0] = ["-j", "1"]
+
+    if not scope_args:
+        if task_name.startswith("ruff-") and Path.cwd().resolve() == WORKSPACE_ROOT:
+            scope_args = ["tests", "examples"]
+        else:
+            scope_args = ["."]
+
+    extra_args = drop_duplicate_args(scope_args, extra_args)
+    return [*command, *scope_args, *extra_args]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    invoked_name = Path(sys.argv[0]).name
+    if invoked_name == "tool":
+        if not args:
+            raise SystemExit("missing poe tool name")
+        task_name = args.pop(0)
+    else:
+        task_name = invoked_name
+    command = build_command(task_name, args)
+    print(shlex.join(command), flush=True)
+    return subprocess.call(command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
