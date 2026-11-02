@@ -1,0 +1,1028 @@
+"""Tool declarations, execution, and aggregation for agents.
+
+Contains :func:`tool`, :class:`AgentTool`, :class:`ToolResolver`,
+:class:`ToolRunner`, the aggregator classes, and the streaming-tool
+type aliases (``StreamingStatusTool``, ``SubAgentTool``,
+``StreamingTextTool``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import dataclasses
+import inspect
+import json
+import typing
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Coroutine,
+    Sequence,
+)
+from typing import (
+    Annotated,
+    Any,
+    Protocol,
+    Self,
+    get_type_hints,
+    overload,
+)
+
+import pydantic
+
+# ``typing.TypeVar`` lacks the ``default=`` kwarg on Python <3.13.
+# Use the typing_extensions backport so this works on 3.12 too.
+from typing_extensions import TypeVar
+
+from .. import experimental_telemetry as telemetry, type_utils, types, util
+from ..types import agent_events as agent_events_, builders, events as events_
+from ..types.messages import MessageBundle
+from . import hooks as hooks_
+from .agent_streaming import _aggregate_from
+
+T = TypeVar("T")
+Item = TypeVar("Item")
+Result = TypeVar("Result")
+
+
+def _unwrap_singleton_group(exc: BaseException) -> BaseException:
+    """Collapse nested singleton ``BaseExceptionGroup``s to the inner exception.
+
+    A failing task inside an ``asyncio.TaskGroup`` is always re-raised
+    inside an ``ExceptionGroup`` even when there's only one — which
+    obscures the real type and message.  When the group has exactly
+    one child we unwrap so the original exception, traceback, and
+    ``__cause__`` survive.  Multi-error groups stay intact (they
+    really do represent concurrent failures).
+    """
+    while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        exc = exc.exceptions[0]
+    return exc
+
+
+def _error_tool_result(
+    exc: BaseException,
+    *,
+    tool_call_id: str,
+    tool_name: str,
+) -> agent_events_.ToolCallResult:
+    """Build an error ``ToolCallResult`` from an exception.
+
+    Unwraps singleton ``ExceptionGroup``s so the surfaced type and
+    message reflect the actual failure.
+    """
+    unwrapped = _unwrap_singleton_group(exc)
+    return tool_result(
+        types.messages.ToolResultPart(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            result=f"{type(unwrapped).__name__}: {unwrapped}",
+            result_kind="error",
+        ),
+        exception=unwrapped,
+    )
+
+
+def _aggregator_cls(
+    factory: Any,
+) -> type[agent_events_.Aggregator[Any, Any, Any]] | None:
+    """Resolve a tool's aggregator factory to the underlying class.
+
+    Tools may declare the aggregator as a class directly (``LastAggregator``)
+    or via an ``Aggregate`` marker that wraps it.  This normalizes both forms.
+    """
+    if factory is None:
+        return None
+    if isinstance(factory, type) and issubclass(factory, agent_events_.Aggregator):
+        return factory
+    inner = getattr(factory, "_factory", None)
+    if isinstance(inner, type) and issubclass(inner, agent_events_.Aggregator):
+        return inner
+    return None
+
+
+def _populate_model_inputs(
+    messages: Sequence[types.messages.Message],
+    tool_resolver: ToolResolver,
+) -> None:
+    """Set ``model_input`` on tool results that arrived without one.
+
+    Tool execution sets ``model_input`` directly; this fills in the
+    value for results that were reconstructed from a wire round-trip
+    (e.g. the AI SDK UI inbound path) and never had it computed.
+    """
+    for msg in messages:
+        if msg.role != "tool":
+            continue
+        for part in msg.tool_results:
+            if part.has_model_input or part.is_error or part.is_hook_deferred:
+                continue
+            tool = tool_resolver.get(part.tool_name)
+            if tool is None:
+                continue
+            convert = tool.to_model_input
+            if convert is None:
+                agg_cls = _aggregator_cls(tool.aggregator)
+                if agg_cls is None:
+                    continue
+                convert = agg_cls.to_model_input
+            part.set_model_input(convert(part.result))
+
+
+class SimpleAggregator[Item, Result](agent_events_.Aggregator[Item, Result, Result]):
+    @classmethod
+    def to_model_input(cls, snapshot: Result) -> Result:
+        return snapshot
+
+
+class ConcatAggregator(SimpleAggregator[str, str]):
+    def __init__(self, *, delim: str = "") -> None:
+        self._parts: list[str] = []
+        self._delim = delim
+
+    def feed(self, item: str) -> None:
+        self._parts.append(item)
+
+    def snapshot(self) -> str:
+        return self._delim.join(self._parts)
+
+
+class LastAggregator[T](SimpleAggregator[T, T | None]):
+    def __init__(self) -> None:
+        self._val: T | None = None
+
+    def feed(self, item: T) -> None:
+        self._val = item
+
+    def snapshot(self) -> T | None:
+        return self._val
+
+
+class MessageAggregator(agent_events_.Aggregator[agent_events_.AgentEvent, MessageBundle, str]):
+    def __init__(self) -> None:
+        self._messages: list[types.messages.Message] = []
+        self._index_by_id: dict[str, int] = {}
+        self._streaming_index: int | None = None
+        self._retry_filter = agent_events_._RetryFilter()
+
+    def feed(self, item: agent_events_.AgentEvent) -> None:
+        if not self._retry_filter.feed(item):
+            return
+        if isinstance(item, agent_events_.Retry):
+            # Drop the in-progress model response and everything after
+            # it (its tool results); the retried stream re-adds them,
+            # possibly under a new id.
+            if self._streaming_index is not None:
+                for m in self._messages[self._streaming_index :]:
+                    del self._index_by_id[m.id]
+                del self._messages[self._streaming_index :]
+                self._streaming_index = None
+            return
+        if isinstance(item, agent_events_.PartialToolCallResult | agent_events_.RunBlocked):
+            return
+        msg = item.message
+        if msg is None:
+            return
+        # Later snapshots of a message replace earlier ones in place.
+        # Snapshots of the same message are not always consecutive —
+        # e.g. a tool-result message can land between two snapshots of
+        # the assistant message that called it — so dedupe by id, not
+        # by checking the tail.
+        index = self._index_by_id.get(msg.id)
+        if index is None:
+            index = len(self._messages)
+            self._index_by_id[msg.id] = index
+            self._messages.append(msg)
+        else:
+            self._messages[index] = msg
+        if isinstance(item, events_.ModelEvent):
+            self._streaming_index = index
+
+    def snapshot(self) -> MessageBundle:
+        return MessageBundle(messages=tuple(self._messages))
+
+    @classmethod
+    def to_model_input(cls, snapshot: MessageBundle | Any) -> str:
+        if not isinstance(snapshot, MessageBundle):
+            snapshot = MessageBundle.model_validate(snapshot)
+        for m in reversed(snapshot.messages):
+            if m.role == "assistant" and m.text:
+                return m.text
+        return ""
+
+
+class Aggregate:
+    r"""Marker for declaring an aggregator on a tool's return type.
+
+    Place inside ``Annotated`` metadata to attach an aggregator factory
+    to an async-generator tool::
+
+        type SubAgentTool = Annotated[
+            AsyncGenerator[ai.events.AgentEvent], Aggregate(MessageAggregator)
+        ]
+
+        @ai.tool
+        async def research(topic: str) -> SubAgentTool:
+            ...
+
+    Extra kwargs are passed to the factory each time it is invoked::
+
+        type Joined = Annotated[
+            AsyncGenerator[str], Aggregate(ConcatAggregator, delim="\\n")
+        ]
+    """
+
+    def __init__(
+        self,
+        factory: Callable[..., agent_events_.Aggregator[Any, Any, Any]],
+        /,
+        **kwargs: Any,
+    ) -> None:
+        self._factory = factory
+        self._kwargs = kwargs
+
+    def __call__(self) -> agent_events_.Aggregator[Any, Any, Any]:
+        return self._factory(**self._kwargs)
+
+    def __repr__(self) -> str:
+        kw = ", ".join(f"{k}={v!r}" for k, v in self._kwargs.items())
+        sep = ", " if kw else ""
+        name = getattr(self._factory, "__name__", self._factory.__class__.__name__)
+        return f"Aggregate({name}{sep}{kw})"
+
+
+StreamingStatusTool = Annotated[AsyncGenerator[Any], Aggregate(LastAggregator)]
+"""Async-generator tool whose final yielded value becomes the tool result.
+
+Intermediate yields stream to the consumer as ``PartialToolCallResult``
+events; the last yield is what the model sees::
+
+    @ai.tool
+    async def fetch(url: str) -> StreamingStatusTool[str]:
+        yield "connecting..."
+        yield "downloading..."
+        yield body  # this is the tool result
+"""
+
+
+SubAgentTool = Annotated[AsyncGenerator[agent_events_.AgentEvent], Aggregate(MessageAggregator)]
+"""Async-generator tool that streams a sub-agent's events.
+
+The collected messages flow to the consumer; the final assistant text
+becomes the tool result the parent model sees::
+
+    @ai.tool
+    async def research(topic: str) -> SubAgentTool:
+        sub = ai.Agent(tools=[...])
+        async with sub.run(model, messages) as stream:
+            async for event in stream:
+                yield event
+"""
+
+
+StreamingTextTool = Annotated[AsyncGenerator[str], Aggregate(ConcatAggregator)]
+"""Async-generator tool whose yielded chunks concatenate into the result.
+
+Each yield streams to the consumer as a ``PartialToolCallResult``;
+the model sees the full concatenation as the tool result::
+
+    @ai.tool
+    async def render(prompt: str) -> StreamingTextTool:
+        async for chunk in some_text_stream(prompt):
+            yield chunk
+
+For a custom delimiter, drop down to the marker form:
+``Annotated[AsyncGenerator[str], Aggregate(ConcatAggregator, delim="\\n")]``.
+"""
+
+
+def _return_type_from_callable(fn: Callable[..., Any]) -> Any:
+    try:
+        return get_type_hints(fn, include_extras=True).get("return")
+    except Exception:
+        return None
+
+
+def _stream_item_type(return_type: Any) -> Any:
+    resolved = type_utils.resolve_type_alias(return_type)
+    if typing.get_origin(resolved) is typing.Annotated:
+        resolved = typing.get_args(resolved)[0]
+
+    if typing.get_origin(resolved) not in (
+        AsyncGenerator,
+        AsyncIterator,
+        AsyncIterable,
+    ):
+        return None
+
+    args = typing.get_args(resolved)
+    return args[0] if args else Any
+
+
+def _aggregator_result_type(
+    aggregator: Callable[[], agent_events_.Aggregator[Any, Any, Any]] | None,
+    stream_item_type: Any,
+) -> Any:
+    agg_cls = _aggregator_cls(aggregator)
+    if agg_cls is None:
+        return None
+
+    args = type_utils.generic_base_args(agg_cls, agent_events_.Aggregator)
+    if args is None:
+        return None
+
+    item_type, result_type, _model_input_type = args
+    bindings = type_utils.bind_typevars(item_type, stream_item_type)
+    return type_utils.replace_typevars(result_type, bindings)
+
+
+def _tool_result_type_from_return_annotation(
+    return_type: Any,
+    aggregator: Callable[[], agent_events_.Aggregator[Any, Any, Any]] | None,
+) -> Any:
+    """Return the type used to validate ``ToolResultPart.result``.
+
+    Normal tools store the function's return value directly, so the function's
+    return annotation is the result type.
+
+    Async-generator tools store ``aggregator.snapshot()`` instead. For those,
+    read the ``Result`` parameter from ``Aggregator[Item, Result, ModelInput]``
+    on the configured aggregator class, binding generic aggregators from the
+    stream item type when possible (for example ``StreamingStatusTool[str]`` +
+    ``LastAggregator[T]`` becomes ``str | None``).
+    """
+    if return_type is None:
+        return None
+
+    item_type = _stream_item_type(return_type)
+    if item_type is not None:
+        return _aggregator_result_type(aggregator, item_type)
+
+    return return_type
+
+
+def _aggregate_from_return_type(fn: Callable[..., Any]) -> Aggregate | None:
+    """Find an ``Aggregate`` marker in *fn*'s return-type metadata, if any.
+
+    Handles three shapes:
+
+    * ``Annotated[X, Aggregate(...)]`` directly,
+    * a PEP 695 alias ``type Foo = Annotated[X, Aggregate(...)]``,
+    * a parameterized alias ``type Foo[T] = Annotated[X[T], Aggregate(...)]``.
+    """
+    ret = _return_type_from_callable(fn)
+    if ret is None:
+        return None
+
+    if isinstance(ret, typing.TypeAliasType):
+        ret = ret.__value__
+    else:
+        origin = typing.get_origin(ret)
+        if isinstance(origin, typing.TypeAliasType):
+            ret = origin.__value__
+
+    metadata = getattr(ret, "__metadata__", ())
+    matches = [m for m in metadata if isinstance(m, Aggregate)]
+    if len(matches) > 1:
+        name = getattr(fn, "__name__", fn.__class__.__name__)
+        raise TypeError(
+            f"Tool {name!r} has multiple Aggregate markers in its "
+            "return-type annotation; expected at most one"
+        )
+    return matches[0] if matches else None
+
+
+Tool = types.tools.Tool
+
+
+@dataclasses.dataclass(frozen=True)
+class AgentTool:
+    """Agent-owned executable tool paired with its model-facing declaration."""
+
+    tool: Tool
+    fn: Callable[..., Any]
+    validator: type[pydantic.BaseModel] | None = None
+    aggregator: Callable[[], agent_events_.Aggregator[Any, Any, Any]] | None = None
+    to_model_input: Callable[[Any], Any] | None = None
+    return_type: Any = None
+
+    @property
+    def name(self) -> str:
+        return self.tool.name
+
+    @property
+    def require_approval(self) -> bool:
+        return self.tool.require_approval
+
+    @property
+    def _aggregator(
+        self,
+    ) -> Callable[[], agent_events_.Aggregator[Any, Any, Any]] | None:
+        return self.aggregator
+
+
+class ToolResolver:
+    """Resolve tool-call parts against a set of agent tools."""
+
+    def __init__(self, tools: Sequence[AgentTool]) -> None:
+        self._tools_by_name = {tool.name: tool for tool in tools}
+
+    def get(self, name: str) -> AgentTool | None:
+        return self._tools_by_name.get(name)
+
+    @overload
+    def resolve(self, tool_part: types.messages.ToolCallPart) -> ToolCall: ...
+    @overload
+    def resolve(self, tool_part: Sequence[types.messages.ToolCallPart]) -> list[ToolCall]: ...
+
+    def resolve(
+        self,
+        tool_part: types.messages.ToolCallPart | Sequence[types.messages.ToolCallPart],
+    ) -> ToolCall | list[ToolCall]:
+        """Resolve ToolCallPart(s) into callable ToolCall object(s)."""
+        if isinstance(tool_part, types.messages.ToolCallPart):
+            tool = self._tools_by_name.get(tool_part.tool_name)
+            if tool is None:
+                raise KeyError(f"No agent executor registered for tool {tool_part.tool_name!r}")
+            tc = BoundToolCall(part=tool_part, tool=tool)
+            if tool.require_approval:
+                return GatedToolCall(tc)
+            return tc
+        return [self.resolve(tp) for tp in tool_part]
+
+
+def _validate_kwargs(
+    tool: AgentTool,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate kwargs and return normalized Python values."""
+    if tool.validator is not None:
+        validated = tool.validator.model_validate(kwargs)
+        return {f: getattr(validated, f) for f in type(validated).model_fields}
+    return kwargs
+
+
+@overload
+def tool[**P, R](fn: Callable[P, Awaitable[R]], /) -> AgentTool: ...
+
+
+@overload
+def tool[**P, T](fn: Callable[P, AsyncIterable[T]], /) -> AgentTool: ...
+
+
+@overload
+def tool[**P](
+    *,
+    require_approval: bool,
+    to_model_input: Callable[[Any], Any] | None = None,
+    return_type: Any = None,
+) -> Callable[[Callable[P, Awaitable[Any] | AsyncIterable[Any]]], AgentTool]: ...
+
+
+@overload
+def tool[**P](
+    *,
+    return_type: Any,
+    require_approval: bool = False,
+    to_model_input: Callable[[Any], Any] | None = None,
+) -> Callable[[Callable[P, Awaitable[Any] | AsyncIterable[Any]]], AgentTool]: ...
+
+
+@overload
+def tool[**P](
+    *,
+    aggregator: Callable[[], agent_events_.Aggregator[Any, Any, Any]],
+    require_approval: bool = False,
+    return_type: Any = None,
+) -> Callable[[Callable[P, AsyncIterable[Any]]], AgentTool]: ...
+
+
+@overload
+def tool[**P](
+    *,
+    to_model_input: Callable[[Any], Any],
+    require_approval: bool = False,
+    return_type: Any = None,
+) -> Callable[[Callable[P, Awaitable[Any] | AsyncIterable[Any]]], AgentTool]: ...
+
+
+def tool[**P, T, R](
+    fn: Callable[P, Awaitable[R]] | Callable[P, AsyncIterable[T]] | None = None,
+    /,
+    *,
+    aggregator: Callable[[], agent_events_.Aggregator[Any, Any, Any]] | None = None,
+    require_approval: bool = False,
+    to_model_input: Callable[[Any], Any] | None = None,
+    return_type: Any = None,
+) -> (
+    Callable[[Callable[P, AsyncIterable[Any]]], AgentTool]
+    | Callable[[Callable[P, Awaitable[R]]], AgentTool]
+    | AgentTool
+):
+    """Turn an async function into a :class:`Tool`.
+
+    For async-generator tools, declare the aggregator either via the
+    ``aggregator=`` keyword argument or by annotating the return type
+    with an :class:`Aggregate` marker (e.g. via the :data:`SubAgentTool`
+    or :data:`StreamingStatusTool` aliases).  Specifying both raises
+    ``TypeError``. Pass ``return_type=`` to override the type used when
+    validating round-tripped tool results.
+
+    Pass ``to_model_input=`` to send the model something other than the
+    result the tool produced -- useful when the result carries detail
+    the UI needs but the model shouldn't pay tokens for::
+
+        @ai.tool(to_model_input=lambda r: r.message)
+        async def edit(path: str) -> EditResult:
+            ...
+
+    It receives the tool's return value, and is mutually exclusive with
+    an aggregator -- a streaming tool derives the model-facing value
+    from the aggregator instead.
+    """
+
+    def wrap(fn: Any) -> AgentTool:
+        sig = inspect.signature(fn)
+        try:
+            hints = get_type_hints(fn)
+        except TypeError:
+            hints = {}
+
+        fields: dict[str, Any] = {}
+        for param_name, param in sig.parameters.items():
+            param_type = hints.get(param_name, str)
+            if param.default is inspect.Parameter.empty:
+                fields[param_name] = (param_type, ...)
+            else:
+                fields[param_name] = (param_type, param.default)
+
+        validator = pydantic.create_model(f"{fn.__name__}_Args", **fields)
+
+        annotated_return_type = _return_type_from_callable(fn)
+        annotated_aggregate = _aggregate_from_return_type(fn)
+        if annotated_aggregate is not None and aggregator is not None:
+            raise TypeError(
+                f"Tool {fn.__name__!r}: aggregator was declared both via "
+                "the `aggregator=` argument and via an Aggregate marker "
+                "in the return-type annotation; specify only one"
+            )
+        effective_aggregator = aggregator or annotated_aggregate
+        if effective_aggregator is not None and to_model_input is not None:
+            raise TypeError(
+                f"Tool {fn.__name__!r}: `to_model_input=` cannot be combined "
+                "with an aggregator; the aggregator's own `to_model_input` "
+                "already derives the model-facing value"
+            )
+
+        tool_decl = Tool(
+            kind="function",
+            name=fn.__name__,
+            spec=types.tools.ToolSpec(
+                description=inspect.getdoc(fn) or "",
+                params=validator.model_json_schema(),
+            ),
+            require_approval=require_approval,
+        )
+
+        return AgentTool(
+            tool=tool_decl,
+            fn=fn,
+            validator=validator,
+            aggregator=effective_aggregator,
+            to_model_input=to_model_input,
+            return_type=return_type
+            or _tool_result_type_from_return_annotation(
+                annotated_return_type, effective_aggregator
+            ),
+        )
+
+    if fn is None:
+        return wrap
+    else:
+        return wrap(fn)
+
+
+class BoundToolCall:
+    """Callable that binds a :class:`ToolCallPart` to its :class:`AgentTool`.
+
+    Calling it executes the tool and returns a ``role="tool"`` message.
+    """
+
+    def __init__(
+        self,
+        part: types.messages.ToolCallPart,
+        tool: AgentTool,
+    ) -> None:
+        self._part = part
+        self._tool = tool
+        self._kwargs: dict[str, Any] | None = None
+
+    @property
+    def id(self) -> str:
+        return self._part.tool_call_id
+
+    @property
+    def name(self) -> str:
+        return self._part.tool_name
+
+    @property
+    def fn(self) -> Callable[..., Awaitable[Any]]:
+        return self._tool.fn
+
+    @property
+    def kwargs(self) -> dict[str, Any]:
+        if self._kwargs is None:
+            kwargs = json.loads(self._part.tool_args) if self._part.tool_args else {}
+            self._kwargs = _validate_kwargs(self._tool, kwargs)
+        return dict(self._kwargs)
+
+    async def __call__(self, **overrides: Any) -> agent_events_.ToolCallResult:
+        """Execute the tool and return a :class:`ToolCallResult`."""
+        token = _current_tool_call.set(self)
+        try:
+            return await self._execute(overrides)
+        finally:
+            _current_tool_call.reset(token)
+
+    async def _execute(self, overrides: dict[str, Any]) -> agent_events_.ToolCallResult:
+        spec = self._tool.tool.spec
+        data = telemetry.ToolExecutionSpanData(
+            tool_name=self._part.tool_name,
+            tool_call_id=self._part.tool_call_id,
+            tool_description=spec.description if spec is not None else None,
+        )
+
+        # Replay-from-deferred-hook short-circuit: if a prior run already
+        # produced a result for this call (cached on the ToolCallPart
+        # by ``_process_interrupted_hooks``), return it without
+        # re-executing the tool.
+        cached = self._part.cached_result
+        if cached is not None:
+            async with telemetry.span(data, replay=True) as sp:
+                sp.data.result = cached.result
+                sp.data.is_error = cached.is_error
+                msg = builders.tool_message(cached)
+                return agent_events_.ToolCallResult(message=msg, results=msg.tool_results)
+
+        # If the model's args are bad, overrides can still supply them;
+        # otherwise the parse error becomes the tool result.
+        parse_error: Exception | None = None
+        try:
+            kwargs = self.kwargs
+        except Exception as exc:
+            kwargs = {}
+            parse_error = exc
+
+        if overrides:
+            # Overrides come from user code, not the model — validate
+            # eagerly so programming errors surface immediately.
+            kwargs = _validate_kwargs(self._tool, {**kwargs, **overrides})
+            parse_error = None
+
+        tool = self._tool
+        data.args = kwargs
+        async with telemetry.span(data) as sp:
+            result: Any
+            model_input: Any = types.messages.MODEL_INPUT_UNSET
+            try:
+                if parse_error is not None:
+                    raise parse_error
+                # The returned value decides how the tool runs, so a
+                # plain `def` returning a coroutine works too.
+                returned = tool.fn(**kwargs)
+                if isinstance(returned, AsyncIterable):
+                    # Streaming tool (e.g. agent-as-a-tool): drain the async
+                    # iterable, forward each yielded value to the runtime for
+                    # real-time streaming, then capture both the aggregator
+                    # snapshot (the rich shape that flows to the UI) and the
+                    # model-facing value (what the LLM sees on its next turn).
+                    if tool.aggregator is None:
+                        raise TypeError(
+                            f"tool {tool.name!r} streams but declares no "
+                            f"aggregator; pass `aggregator=` or annotate its "
+                            f"return type with an Aggregate marker"
+                        )
+                    agg = await _aggregate_from(
+                        returned,
+                        tool_call_id=self.id,
+                        tool_name=self.name,
+                        aggregator=tool.aggregator,
+                    )
+                    result = agg.snapshot()
+                    model_input = agg.get_model_input()
+                elif inspect.isawaitable(returned):
+                    result = await returned
+                else:
+                    raise TypeError(
+                        f"tool {tool.name!r} must return an awaitable or an "
+                        f"async iterable, not {type(returned).__name__}; "
+                        f"declare it with `async def`"
+                    )
+                if tool.to_model_input is not None:
+                    model_input = tool.to_model_input(result)
+            except (Exception, asyncio.CancelledError) as exc:
+                res = _error_tool_result(exc, tool_call_id=self.id, tool_name=self.name)
+            else:
+                res = tool_result(
+                    types.messages.ToolResultPart(
+                        tool_call_id=self.id,
+                        tool_name=self.name,
+                        result=result,
+                        result_kind=types.messages.ToolResultPart.kind_for(result),
+                        model_input=model_input,
+                    )
+                )
+            sp.data.result = res.results[0].result
+            sp.data.is_error = res.results[0].is_error
+            # A tool exception is caught and converted to an error
+            # result above, so it never hits the span's own except
+            # path — thread it through explicitly.
+            if res.exception is not None:
+                sp.error = telemetry.SpanError.from_exception(res.exception)
+            return res
+
+
+class GatedToolCall:
+    """ToolCall-shaped wrapper that awaits an approval hook before executing.
+
+    ``ToolRunner.schedule`` only consumes the ``__call__`` shape of
+    ``ToolCall``; this wrapper supplies the same shape while inserting
+    the hook await + denial path before the underlying tool runs.
+    """
+
+    def __init__(self, tc: ToolCall) -> None:
+        self._tc = tc
+
+    @property
+    def id(self) -> str:
+        return self._tc.id
+
+    @property
+    def name(self) -> str:
+        return self._tc.name
+
+    @property
+    def fn(self) -> Callable[..., Awaitable[Any]]:
+        return self._tc.fn
+
+    @property
+    def kwargs(self) -> dict[str, Any]:
+        return self._tc.kwargs
+
+    async def __call__(self) -> agent_events_.ToolCallResult:
+        tc = self._tc
+        # If the model sent invalid arguments, skip the approval hook
+        # and return the validation error directly as a tool result.
+        try:
+            hook_kwargs = tc.kwargs
+        except Exception as exc:
+            return _error_tool_result(
+                exc,
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+            )
+        try:
+            approval = await hooks_.hook(
+                f"approve_{tc.id}",
+                payload=types.tools.ToolApproval,
+                metadata={"tool": tc.name, "kwargs": hook_kwargs},
+                tool_call_id=tc.id,
+            )
+        except hooks_.HookDeferredException as e:
+            return deferred_tool_result(e.hook, tool_call_id=tc.id, tool_name=tc.name)
+        if approval.granted:
+            return await tc()
+        return tool_result(
+            tool_call_id=tc.id,
+            tool_name=tc.name,
+            result=f"Rejected: {approval.reason}",
+            is_error=True,
+        )
+
+
+class ToolCallCallable(Protocol):
+    """Anything ``ToolRunner.schedule`` can accept.
+
+    Satisfied by :class:`ToolCall` and by any zero-arg callable returning
+    a coroutine that resolves to a :class:`~ai.agents.events.ToolCallResult`
+    — e.g. an inline closure that gates the tool behind an approval hook.
+    """
+
+    def __call__(self) -> Coroutine[Any, Any, agent_events_.ToolCallResult]: ...
+
+
+class ToolCall(ToolCallCallable, Protocol):
+    """Something with all the key information for a tool call."""
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def fn(self) -> Callable[..., Awaitable[Any]]: ...
+
+    @property
+    def kwargs(self) -> dict[str, Any]: ...
+
+
+_current_tool_call: contextvars.ContextVar[ToolCall] = contextvars.ContextVar("current_tool_call")
+
+
+class _RestartableToolStream:
+    def __init__(self, tr: ToolRunner) -> None:
+        self._tr = tr
+
+    def __aiter__(self) -> AsyncGenerator[agent_events_.ToolCallResult]:
+        return self._tr._iterate()
+
+
+class ToolRunner:
+    def __init__(self) -> None:
+        self._tool_results: dict[
+            asyncio.Future[agent_events_.ToolCallResult], agent_events_.ToolCallResult
+        ] = {}
+        self._tg_base = util.TaskGroup()
+        self._waiter: util.MultiWaiter[agent_events_.ToolCallResult] = util.MultiWaiter()
+        self._tasks: dict[asyncio.Task[agent_events_.ToolCallResult], str | None] = {}
+        self._id_to_task: dict[str, asyncio.Task[agent_events_.ToolCallResult]] = {}
+
+    async def __aenter__(self) -> Self:
+        self._tg = await self._tg_base.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        self._waiter.clear()
+        return await self._tg_base.__aexit__(*args)
+
+    def events(self) -> _RestartableToolStream:
+        return _RestartableToolStream(self)
+
+    def schedule(self, tc: ToolCallCallable) -> asyncio.Task[agent_events_.ToolCallResult]:
+        """Schedule a tool call (or any callable producing a ToolCallResult).
+
+        See :class:`ToolCallCallable` — accepts both :class:`ToolCall` and
+        any zero-arg callable returning a coroutine that resolves to a
+        :class:`ToolCallResult`.  The latter lets you wrap a ``ToolCall``
+        in custom logic (e.g. an approval hook await) and still ride the
+        runner's merge-and-iterate flow.
+
+        If ``tc`` has an ``id`` that was already scheduled (and not
+        discarded), the existing task is returned instead of running the
+        call again.
+
+        Returns the task.
+        """
+        id = getattr(tc, "id", None)
+        if id is not None and id in self._id_to_task:
+            return self._id_to_task[id]
+
+        task = self._tg.create_task(tc())
+        self._waiter.add(task)
+        self._tasks[task] = id
+        if id is not None:
+            self._id_to_task[id] = task
+        return task
+
+    def discard(self, task: asyncio.Task[agent_events_.ToolCallResult]) -> None:
+        """Discard a task from the ToolRunner.
+
+        Cancel the task and ignore its result.
+        """
+        self._tool_results.pop(task, None)
+        id = self._tasks.pop(task, None)
+        if id is not None:
+            del self._id_to_task[id]
+        self._waiter.discard(task)
+        task.cancel("task discarded")
+
+    def discard_all(self, *, except_: Collection[ToolCall] = ()) -> None:
+        """Discard every scheduled task, except those for ``except_``."""
+        keep = {tc.id for tc in except_}
+        for task, id in list(self._tasks.items()):
+            if id not in keep:
+                self.discard(task)
+
+    def add_result(self, res: agent_events_.ToolCallResult) -> None:
+        async def _feed() -> agent_events_.ToolCallResult:
+            return res
+
+        self._waiter.add(self._tg.create_task(_feed()))
+
+    def get_tool_message(self) -> types.messages.Message | None:
+        if self._tool_results:
+            return builders.tool_message(*[t.message for t in self._tool_results.values()])
+        return None
+
+    async def _iterate(self) -> AsyncGenerator[agent_events_.ToolCallResult]:
+        while t := await self._waiter:
+            try:
+                res = t.result()
+            except asyncio.CancelledError:
+                # If a task got cancelled, that's fine.
+                # Need to catch it or the whole runner gets zapped.
+                continue
+
+            assert res is not None
+            self._tool_results[t] = res
+            yield res
+
+
+def tool_result(
+    *items: types.messages.Message
+    | types.messages.ToolResultPart
+    | agent_events_.ToolCallResult
+    | list[types.messages.Message],
+    tool_call_id: str | None = None,
+    result: Any = None,
+    tool_name: str = "",
+    is_error: bool = False,
+    exception: BaseException | None = None,
+) -> agent_events_.ToolCallResult:
+    """Create a :class:`ToolCallResult` from tool messages, parts, or kwargs.
+
+    Accepts ``ToolCallResult`` items (extracts their ``.message``),
+    plain ``Message`` objects, ``ToolResultPart`` instances, or keyword
+    arguments matching :func:`ai.tool_message`::
+
+        yield ai.tool_result(*(t.result() for t in tasks))
+        ai.tool_result(tool_call_id="tc-1", result="denied", is_error=True)
+
+    Pass ``exception=`` to attach the raised :class:`BaseException` to
+    the returned event for richer logging downstream — the wire-bound
+    ``ToolResultPart`` only carries ``str(exc)``.
+    """
+    if tool_call_id is not None:
+        msg = builders.tool_message(
+            tool_call_id=tool_call_id,
+            result=result,
+            tool_name=tool_name,
+            is_error=is_error,
+        )
+        return agent_events_.ToolCallResult(
+            message=msg, results=msg.tool_results, exception=exception
+        )
+
+    unwrapped: list[types.messages.Message | types.messages.ToolResultPart] = []
+    for item in items:
+        if isinstance(item, agent_events_.ToolCallResult):
+            unwrapped.append(item.message)
+        elif isinstance(item, list):
+            unwrapped.extend(item)
+        else:
+            unwrapped.append(item)
+    msg = builders.tool_message(*unwrapped)
+    return agent_events_.ToolCallResult(message=msg, results=msg.tool_results, exception=exception)
+
+
+def deferred_tool_result(
+    hook: types.messages.HookPart[Any],
+    *,
+    tool_call_id: str,
+    tool_name: str = "",
+) -> agent_events_.ToolCallResult:
+    """Build an error :class:`ToolCallResult` for a deferred tool call.
+
+    Use in approval-gated flows when a hook deferral
+    (e.g. ``HookDeferredException``) leaves a tool call without a real
+    result.  The placeholder is flagged
+    ``is_error=True`` and keeps the assistant turn well-formed (every
+    ``tool_call`` paired with a ``tool_result``) so the run can be replayed
+    on the next invocation once the hook is resolved::
+
+        try:
+            approval = await ai.hook(...)
+        except ai.HookDeferredException as e:
+            return ai.deferred_tool_result(
+                e.hook, tool_call_id=tc.id, tool_name=tc.name
+            )
+
+    The hook itself is surfaced separately via the ``HookPart`` already
+    emitted by ``ai.hook()`` (status=``"pending"``) which downstream
+    consumers (e.g. the ai-sdk UI bridge) use to render the actual
+    approval state.
+    """
+    part = types.messages.ToolResultPart(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        result=f"Deferred on hook {hook.hook_id!r}",
+        result_kind="error",
+        is_hook_deferred=True,
+    )
+    msg = types.messages.Message(role="tool", parts=[part])
+    return agent_events_.ToolCallResult(message=msg, results=msg.tool_results)
+
+
+def current_tool_call() -> ToolCall:
+    """Return the tool call executing in this context.
+
+    This is available from code called during tool execution. Calling it
+    outside a tool call raises :class:`LookupError`.
+    """
+    return _current_tool_call.get()

@@ -5,49 +5,49 @@ on:
     branches:
       - main
   pull_request:
-permissions: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redistribute-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-redistribute:
+    name: test-redistribute
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
-      - name: Dump GitHub context
-        env:
-          GITHUB_CONTEXT: ${{ toJson(github) }}
-        run: echo "$GITHUB_CONTEXT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version-file: ".python-version"
-      - name: Install build dependencies
-        run: pip install build
-      - name: Build source distribution
-        run: python -m build --sdist
-      - name: Decompress source distribution
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install dependencies
+        run: uv sync --all-packages --frozen --python 3.12
+
+      - name: Build every package
+        run: uv build --all-packages --no-sources
+
+      - name: Verify every wheel installs
+        run: uv run --frozen python scripts/verify_dist.py --dist-dir dist
+
+      - name: Rebuild wheels from every sdist
         run: |
-          cd dist
-          tar xvf khulnasoft*.tar.gz
-      - name: Install test dependencies
-        run: |
-          cd dist/khulnasoft*/
-          pip install --editable .
-          pip install pytest pytest-asyncio pytest-xdist
-      - name: Run source distribution tests
-        run: |
-          cd dist/khulnasoft*/
-          python -m pytest tests/ -q
-      - name: Build wheel distribution
-        run: |
-          cd dist
-          pip wheel --no-deps khulnasoft*.tar.gz
-      - name: Dump GitHub context
-        env:
-          GITHUB_CONTEXT: ${{ toJson(github) }}
-        run: echo "$GITHUB_CONTEXT"
+          mkdir -p dist/rebuilt
+          for sdist in dist/*.tar.gz; do
+            uv build --wheel --no-sources --out-dir dist/rebuilt "$sdist"
+          done
+          built=$(find dist/rebuilt -name '*.whl' | wc -l)
+          sources=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
+          if [ "$built" -ne "$sources" ]; then
+            echo "Rebuilt $built wheels from $sources sdists" >&2
+            exit 1
+          fi
 
   # https://github.com/marketplace/actions/alls-green#why
   test-redistribute-alls-green:  # This job does nothing and is only used for the branch protection

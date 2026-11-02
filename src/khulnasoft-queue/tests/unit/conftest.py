@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+
+from khulnasoft.headers import set_headers
+from khulnasoft.oidc.token import _clear_cached_oidc_token
+from khulnasoft.queue._internal.http import reset_http_client_pools_for_tests
+from khulnasoft.queue._internal.lease import reset_lease_renewal_worker_for_tests
+from khulnasoft.queue.devserver import EmbeddedQueueDevServer
+from khulnasoft.queue.testing import (
+    clear_subscriptions as clear_queue_subscriptions,
+    reset_default_queue_clients as reset_queue_clients,
+)
+
+
+def _clear_subscriptions() -> Iterator[None]:
+    clear_queue_subscriptions()
+    try:
+        yield
+    finally:
+        clear_queue_subscriptions()
+
+
+@pytest.fixture
+def isolated_subscriptions() -> Iterator[None]:
+    yield from _clear_subscriptions()
+
+
+@pytest.fixture(params=["asyncio", "trio"])
+def anyio_backend(request: pytest.FixtureRequest) -> str:
+    return request.param
+
+
+@pytest.fixture(autouse=True)
+def queue_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KHULNASOFT_REGION", "iad1")
+
+
+@pytest.fixture(autouse=True)
+def reset_default_queue_clients() -> Iterator[None]:
+    reset_lease_renewal_worker_for_tests()
+    reset_http_client_pools_for_tests()
+    reset_queue_clients()
+    set_headers(None)
+    _clear_cached_oidc_token()
+
+    try:
+        yield
+    finally:
+        reset_lease_renewal_worker_for_tests()
+        reset_http_client_pools_for_tests()
+        reset_queue_clients()
+        set_headers(None)
+        _clear_cached_oidc_token()
+
+
+@pytest.fixture
+def embedded_queue_module_env(
+    eqs: EmbeddedQueueDevServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> EmbeddedQueueDevServer:
+    monkeypatch.setenv("KHULNASOFT_QUEUE_BASE_URL", eqs.base_url)
+    monkeypatch.setenv("KHULNASOFT_QUEUE_TOKEN", "token")
+    return eqs

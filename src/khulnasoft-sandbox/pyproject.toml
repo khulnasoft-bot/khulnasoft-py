@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-sandbox"
+dynamic = ["version", "dependencies"]
+description = "Python SDK for Khulnasoft Sandbox"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[project.scripts]
+khulnasoft-sandbox = "khulnasoft.sandbox.__main__:main"
+sandbox = "khulnasoft.sandbox.__main__:main"
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "khulnasoft-internal-core>=0.2.0,<0.3.0",
+    "khulnasoft-oidc>=0.6.0",
+    "anyio>=4.0.0,<5",
+    "httpx2>=2",
+    "pydantic>=2.7.0,<3",
+]
+
+[tool.uv.sources]
+khulnasoft-internal-core = { workspace = true }
+khulnasoft-oidc = { workspace = true }
+
+[tool.hatch.version]
+path = "khulnasoft/sandbox/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/sandbox/**/*.py",
+    "/khulnasoft/sandbox/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = ["/**/__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/khulnasoft/sandbox"]
+exclude = ["/**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys -m 'not live'"
+asyncio_mode = "auto"
+markers = ["live: requires live Sandbox API credentials"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-sandbox"
+explicit_package_bases = true
+packages = ["khulnasoft.sandbox"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"
+
+[tool.poe.tasks.test-examples]
+cmd = "$PYTEST -m live tests/live/test_examples.py"

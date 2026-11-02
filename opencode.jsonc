@@ -1,0 +1,20 @@
+{
+  // Opencode configuration for the KhulnaSoft Python SDK monorepo
+  "skills": [
+    {
+      "name": "python-sdk",
+      "description": "Python SDK development guidance for the KhulnaSoft monorepo",
+      "path": ".opencode/skills/python-sdk.md"
+    },
+    {
+      "name": "ai-module",
+      "description": "khulnasoft.ai module development guidance (agents, models, tools, streaming, telemetry)",
+      "path": ".opencode/skills/ai-module.md"
+    },
+    {
+      "name": "documentation",
+      "description": "Documentation skill for creating and maintaining package docs",
+      "path": ".opencode/skills/documentation.md"
+    }
+  ]
+}

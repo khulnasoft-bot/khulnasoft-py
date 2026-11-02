@@ -1,0 +1,22 @@
+[project]
+name = "khulnasoft-django-tasks-example-chunks"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "Django>=6",
+    "khulnasoft-cache",
+    "khulnasoft-django-tasks",
+]
+
+[tool.khulnasoft]
+entrypoint = "chunks_project.wsgi:application"
+
+# Compiles the Django WSGI application into a queue-triggered function. With
+# no "topics" filter, the subscriber consumes every task queue registered
+# while Django starts up.
+[[tool.khulnasoft.subscribers]]
+entrypoint = "chunks_project.wsgi"
+
+[tool.uv.sources]
+khulnasoft-cache = { path = "../../../../src/khulnasoft-cache", editable = true }
+khulnasoft-django-tasks = { path = "../..", editable = true }

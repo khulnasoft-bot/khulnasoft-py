@@ -1,0 +1,20 @@
+[project]
+name = "khulnasoft-celery-example-chunks"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "celery>=5.3,<6",
+    "fastapi",
+    "khulnasoft-cache>=0.7.0",
+    "khulnasoft-celery>=0.7.0",
+    "khulnasoft-queue>=0.7.0",
+]
+
+[tool.uv]
+package = false
+
+# Compiles worker.py into a queue-triggered function. With no "topics"
+# filter, the subscriber consumes every subscription introspected from the
+# Celery app's queues.
+[[tool.khulnasoft.subscribers]]
+entrypoint = "worker:celery_app"

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-import tomllib
+from __future__ import annotations
 
-with open("pyproject.toml", "rb") as f:
-    print(tomllib.load(f)["project"]["version"])
+import sys
+
+from workspace import main
+
+package = sys.argv[1] if len(sys.argv) > 1 else "khulnasoft"
+raise SystemExit(main(["version", package]))

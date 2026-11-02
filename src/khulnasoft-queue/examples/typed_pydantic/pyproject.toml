@@ -1,0 +1,17 @@
+[project]
+name = "khulnasoft-queue-example-typed-pydantic"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7.0",
+    "khulnasoft-queue[typed]>=0.6.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+khulnasoft-queue = { git = "https://github.com/khulnasoft/khulnasoft-py.git", branch = "main", subdirectory = "src/khulnasoft-queue" }
+
+[[tool.khulnasoft.subscribers]]
+entrypoint = "main:handle_order"

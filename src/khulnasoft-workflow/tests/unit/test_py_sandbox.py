@@ -1,0 +1,1220 @@
+"""Tests for the workflow sandbox (khulnasoft.workflow.py_sandbox).
+
+Covers:
+- _RESTRICTIONS: builtins, datetime, platform, os, time, socket, random, threading,
+  asyncio, zstandard, io, _io
+- _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
+- _PASSTHROUGHS: stdlib modules that pass through unchanged (including asyncio)
+- WorkflowLoop: allowlisted methods pass, restricted I/O/subprocess methods blocked
+- random: module-level functions blocked; explicit Random(seed) allowed
+- Module isolation: non-passthrough modules are freshly imported
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import struct
+import sys
+import time
+from contextlib import contextmanager
+
+import pytest
+
+from khulnasoft.workflow._internal import py_sandbox
+from khulnasoft.workflow._internal.py_sandbox import Sandbox, SandboxRestrictionError
+from khulnasoft.workflow.sandbox import (
+    ALL_CLEANUPS,
+    SandboxCleanupContext,
+    SandboxPolicy,
+)
+
+CLEANUP_ALL = SandboxPolicy(cleanups=ALL_CLEANUPS)
+
+
+@contextmanager
+def workflow_sandbox(*, policy: SandboxPolicy | None = None):
+    with Sandbox(policy=policy).enter():
+        yield
+
+
+# ── helpers ────────────────────────────────────────────────────
+
+
+def _run_in_sandbox(code: str) -> dict:
+    """exec *code* inside a sandbox and return its local namespace."""
+    ns: dict = {}
+    with workflow_sandbox():
+        # Pass sandbox builtins so that exec'd code sees the proxy.
+        ns["__builtins__"] = sys.modules["builtins"]
+        exec(code, ns)  # noqa: S102
+    return ns
+
+
+def _raises_in_sandbox(code: str) -> None:
+    """Assert that *code* raises SandboxRestrictionError inside a sandbox."""
+    with pytest.raises(SandboxRestrictionError):
+        _run_in_sandbox(code)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  builtins restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestBuiltinsRestrictions:
+    def test_open_blocked(self):
+        _raises_in_sandbox("open('/dev/null')")
+
+    def test_input_blocked(self):
+        _raises_in_sandbox("input()")
+
+    def test_breakpoint_blocked(self):
+        _raises_in_sandbox("breakpoint()")
+
+    def test_eval_blocked(self):
+        _raises_in_sandbox("eval('1+1')")
+
+    def test_exec_blocked(self):
+        _raises_in_sandbox("exec('pass')")
+
+    def test_compile_blocked(self):
+        _raises_in_sandbox("compile('pass', '<string>', 'exec')")
+
+    def test_print_allowed(self):
+        _run_in_sandbox("print('hello')")
+
+    def test_len_allowed(self):
+        ns = _run_in_sandbox("result = len([1,2,3])")
+        assert ns["result"] == 3
+
+    def test_isinstance_allowed(self):
+        ns = _run_in_sandbox("result = isinstance(42, int)")
+        assert ns["result"] is True
+
+
+# ═══════════════════════════════════════════════════════════════
+#  datetime restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestDatetimeRestrictions:
+    def test_datetime_now_blocked(self):
+        _raises_in_sandbox("import datetime; datetime.datetime.now()")
+
+    def test_datetime_utcnow_blocked(self):
+        _raises_in_sandbox("import datetime; datetime.datetime.utcnow()")
+
+    def test_date_today_blocked(self):
+        _raises_in_sandbox("import datetime; datetime.date.today()")
+
+    def test_datetime_constructor_allowed(self):
+        ns = _run_in_sandbox("import datetime; result = datetime.datetime(2024, 1, 1, 12, 0, 0)")
+        assert ns["result"].year == 2024
+
+    def test_timedelta_allowed(self):
+        ns = _run_in_sandbox("import datetime; result = datetime.timedelta(days=5).total_seconds()")
+        assert ns["result"] == 5 * 86400
+
+    def test_isinstance_datetime(self):
+        ns = _run_in_sandbox(
+            "import datetime; result = isinstance(datetime.datetime(2024, 1, 1), datetime.datetime)"
+        )
+        assert ns["result"] is True
+
+    def test_isinstance_date(self):
+        ns = _run_in_sandbox(
+            "import datetime; result = isinstance(datetime.date(2024, 1, 1), datetime.date)"
+        )
+        assert ns["result"] is True
+
+
+# ═══════════════════════════════════════════════════════════════
+#  os restrictions (allowlist)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestOsRestrictions:
+    def test_os_path_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.path.join('a', 'b')")
+        assert ns["result"] == os.path.join("a", "b")
+
+    def test_os_path_alias_allowed(self):
+        path = os.path.join("a", "b")
+        ns = _run_in_sandbox(f"from os.path import dirname; result = dirname({path!r})")
+        assert ns["result"] == os.path.dirname(path)
+
+    def test_os_sep_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.sep")
+        assert ns["result"] == os.sep
+
+    def test_os_name_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.name")
+        assert ns["result"] == os.name
+
+    def test_os_fspath_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.fspath('/tmp')")
+        assert ns["result"] == "/tmp"
+
+    def test_os_constants_allowed(self):
+        _run_in_sandbox("import os; _ = os.O_RDONLY")
+
+    def test_os_getcwd_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.getcwd()")
+        assert isinstance(ns["result"], str)
+
+    def test_os_listdir_blocked(self):
+        _raises_in_sandbox("import os; os.listdir('.')")
+
+    def test_os_urandom_blocked(self):
+        _raises_in_sandbox("import os; os.urandom(16)")
+
+    def test_os_getpid_blocked(self):
+        _raises_in_sandbox("import os; os.getpid()")
+
+    def test_os_fork_dropped(self):
+        with workflow_sandbox():
+            import os
+
+            assert not hasattr(os, "fork")
+
+    def test_os_register_at_fork_dropped(self):
+        with workflow_sandbox():
+            import os
+
+            assert not hasattr(os, "register_at_fork")
+
+    def test_traceback_format_exc_with_real_files(self):
+        """traceback.format_exc() must work inside the sandbox when the
+        traceback includes frames from real files on disk.
+
+        Regression: traceback uses linecache which calls os.stat() and
+        open(), triggering SandboxRestrictionError.
+        """
+        # json.loads raises from a real .py file (not <string>)
+        ns = _run_in_sandbox(
+            "import traceback, ast\n"
+            "try:\n"
+            "    ast.literal_eval('{')\n"
+            "except Exception:\n"
+            "    result = traceback.format_exc()\n"
+        )
+        # traceback.format_exc() must produce output with real file paths
+        assert "ast.py" in ns["result"]
+
+    def test_os_environ_is_copy(self):
+        """os.environ should be a static copy, not the live environ."""
+        import os as real_os
+
+        ns = _run_in_sandbox("import os; result = type(os.environ)")
+        # Should be a dict (copy), not os._Environ
+        assert ns["result"] is dict or ns["result"] is not type(real_os.environ)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  platform restrictions (allowlist)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPlatformRestrictions:
+    def test_platform_system_answered_by_the_host(self):
+        """The sandbox's own `platform` cannot answer: it reaches `os.uname()`.
+
+        Which matters beyond anyone calling it directly -- before 3.13 `uuid`
+        calls it at import on everything but Windows and macOS, so blocking it
+        means a workflow cannot import `uuid` at all on Linux.
+        """
+        ns = _run_in_sandbox("import platform; result = platform.system()")
+        assert ns["result"] == platform.system()
+
+    def test_platform_host_identity_blocked(self):
+        # `node` and `uname` report which *machine* this is, and two replays of
+        # one run are not generally the same machine. The rest are blocked
+        # because the module is an allowlist -- reaching `os.uname()` would stop
+        # them anyway, but they name themselves rather than the syscall.
+        for call in ("node()", "uname()", "machine()", "platform()", "processor()"):
+            with pytest.raises(SandboxRestrictionError, match=rf"platform\.{call[:-2]}\("):
+                _run_in_sandbox(f"import platform; platform.{call}")
+
+    def test_uuid_imports_but_uuid4_stays_blocked(self):
+        """What `platform.system()` buys, and what it must not cost.
+
+        Reaching `uuid` by passthrough would fix the import too, but it hands
+        the sandbox the host module, whose `os` is the unrestricted one -- and
+        `uuid4()` would work.
+        """
+        ns = _run_in_sandbox("import uuid; result = uuid.UUID(int=1)")
+        assert str(ns["result"]) == "00000000-0000-0000-0000-000000000001"
+        _raises_in_sandbox("import uuid; uuid.uuid4()")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  time restrictions (allowlist)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestTimeRestrictions:
+    def test_time_time_blocked(self):
+        _raises_in_sandbox("import time; time.time()")
+
+    def test_time_sleep_blocked(self):
+        _raises_in_sandbox("import time; time.sleep(0)")
+
+    def test_time_monotonic_blocked(self):
+        _raises_in_sandbox("import time; time.monotonic()")
+
+    def test_time_perf_counter_blocked(self):
+        _raises_in_sandbox("import time; time.perf_counter()")
+
+    def test_time_gmtime_blocked(self):
+        _raises_in_sandbox("import time; time.gmtime()")
+
+    def test_time_localtime_blocked(self):
+        _raises_in_sandbox("import time; time.localtime()")
+
+    def test_time_mktime_allowed(self):
+        ns = _run_in_sandbox("import time; result = time.mktime((2024, 1, 1, 0, 0, 0, 0, 1, -1))")
+        assert isinstance(ns["result"], float)
+
+    def test_time_strptime_accessible(self):
+        """strptime is in the allowlist (not restricted), but may fail at
+        runtime because _strptime internally calls strftime which is blocked."""
+        ns = _run_in_sandbox("import time; result = time.strptime")
+        assert callable(ns["result"])
+
+    def test_time_struct_time_allowed(self):
+        _run_in_sandbox("import time; _ = time.struct_time")
+
+    def test_time_constants_allowed(self):
+        for name in (
+            "CLOCK_REALTIME",
+            "CLOCK_MONOTONIC",
+            "CLOCK_PROCESS_CPUTIME_ID",
+            "CLOCK_THREAD_CPUTIME_ID",
+        ):
+            ns = _run_in_sandbox(
+                f"import time; result = (hasattr(time, {name!r}), getattr(time, {name!r}, None))"
+            )
+            assert ns["result"] == (hasattr(time, name), getattr(time, name, None))
+
+    @pytest.mark.asyncio
+    async def test_concurrent_coroutine_not_affected_by_sandbox(self):
+        """Regression test: a concurrent coroutine that lazy-imports time
+        while another coroutine has the sandbox active must NOT be
+        restricted — the sandbox context is per-task via ContextVar."""
+        import asyncio
+
+        barrier = asyncio.Event()
+        result = None
+
+        async def sandbox_task():
+            """Activates the sandbox and waits inside it."""
+            with workflow_sandbox():
+                barrier.set()
+                await asyncio.sleep(0.05)
+
+        async def victim_task():
+            """Lazy-imports time while sandbox is active, then calls time.time()."""
+            nonlocal result
+            await barrier.wait()
+            import time
+
+            result = time.time()
+
+        await asyncio.gather(sandbox_task(), victim_task())
+        assert isinstance(result, float) and result > 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sandboxes_do_not_corrupt_sys_modules(self):
+        """Two concurrent sandboxes must not corrupt sys.modules.
+
+        The first sandbox to enter patches sys.modules; the second must
+        not snapshot the patched state.  On exit, sys.modules must be
+        fully restored regardless of exit order."""
+        import asyncio
+        import time as real_time
+
+        ready_a = asyncio.Event()
+        ready_b = asyncio.Event()
+
+        async def sandbox_a():
+            with workflow_sandbox():
+                ready_a.set()
+                await ready_b.wait()
+                _raises_in_sandbox("import time; time.time()")
+                await asyncio.sleep(0.02)
+
+        async def sandbox_b():
+            with workflow_sandbox():
+                ready_b.set()
+                await ready_a.wait()
+                _raises_in_sandbox("import time; time.time()")
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(sandbox_a(), sandbox_b())
+        # After both exit, sys.modules must be restored
+        assert sys.modules.get("time") is real_time
+        # Sanity check: no proxy modules leaked
+        assert isinstance(sys.modules["time"].time, type(real_time.time))
+
+
+# ═══════════════════════════════════════════════════════════════
+#  socket restrictions (allowlist)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestSocketRestrictions:
+    def test_socket_socket_blocked(self):
+        _raises_in_sandbox("import socket; socket.socket()")
+
+    def test_socket_create_connection_blocked(self):
+        _raises_in_sandbox("import socket; socket.create_connection(('localhost', 80))")
+
+    def test_socket_htons_allowed(self):
+        ns = _run_in_sandbox("import socket; result = socket.htons(80)")
+        assert isinstance(ns["result"], int)
+
+    def test_socket_inet_aton_allowed(self):
+        ns = _run_in_sandbox("import socket; result = socket.inet_aton('127.0.0.1')")
+        assert isinstance(ns["result"], bytes)
+
+    def test_socket_constants_allowed(self):
+        _run_in_sandbox("import socket; _ = socket.AF_INET")
+
+    def test_socket_error_allowed(self):
+        _run_in_sandbox("import socket; _ = socket.error")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  random restrictions + determinism
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestRandomRestrictions:
+    def test_random_module_random_blocked(self):
+        _raises_in_sandbox("import random; random.random()")
+
+    def test_random_module_randint_blocked(self):
+        _raises_in_sandbox("import random; random.randint(0, 10)")
+
+    def test_random_module_seed_blocked(self):
+        _raises_in_sandbox("import random; random.seed(42)")
+
+    def test_random_module_getstate_blocked(self):
+        _raises_in_sandbox("import random; random.getstate()")
+
+    def test_system_random_blocked(self):
+        _raises_in_sandbox("import random; random.SystemRandom()")
+
+    def test_random_new_instance_seed_none_blocked(self):
+        """New Random() instances use _RestrictedRandom which blocks seed(None)."""
+        _raises_in_sandbox("import random; random.Random().seed()")
+
+    def test_random_instance_seed_none_blocked(self):
+        _raises_in_sandbox("import random; r = random.Random(); r.seed()")
+
+    def test_random_instance_seed_explicit_allowed(self):
+        ns = _run_in_sandbox("import random; r = random.Random(42); result = r.random()")
+        assert isinstance(ns["result"], float)
+
+    def test_host_random_not_affected(self):
+        """Sandbox should not modify the host random state."""
+        import random
+
+        state_before = random.getstate()
+        _run_in_sandbox("import random; r = random.Random(42); r.random()")
+        state_after = random.getstate()
+        assert state_before == state_after
+
+
+# ═══════════════════════════════════════════════════════════════
+#  threading restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestThreadingRestrictions:
+    def test_thread_blocked(self):
+        _raises_in_sandbox("import threading; threading.Thread(target=lambda: None).start()")
+
+    def test_timer_blocked(self):
+        _raises_in_sandbox("import threading; threading.Timer(0, lambda: None).start()")
+
+    def test_settrace_blocked(self):
+        _raises_in_sandbox("import threading; threading.settrace(lambda *a: None)")
+
+    def test_setprofile_blocked(self):
+        _raises_in_sandbox("import threading; threading.setprofile(lambda *a: None)")
+
+    def test_lock_allowed(self):
+        _run_in_sandbox("import threading; lock = threading.Lock(); lock.acquire(); lock.release()")
+
+    def test_event_allowed(self):
+        _run_in_sandbox("import threading; e = threading.Event(); e.set(); e.is_set()")
+
+    def test_current_thread_allowed(self):
+        _run_in_sandbox("import threading; threading.current_thread()")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  zstandard restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestZstandardRestrictions:
+    @pytest.fixture(autouse=True)
+    def _require_zstandard(self):
+        pytest.importorskip("zstandard")
+
+    def test_zstandard_imports(self):
+        """zstandard should be importable inside the sandbox."""
+        _run_in_sandbox("import zstandard")
+
+    def test_zstandard_open_blocked(self):
+        """zstandard.open should be blocked inside the sandbox."""
+        _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
+
+    def test_from_zstandard_open_blocked(self):
+        """from zstandard import open should also be blocked inside the sandbox."""
+        _raises_in_sandbox("from zstandard import open; open('file.zst')")
+
+    def test_zstandard_compress_allowed(self):
+        """zstandard compression and decompression should work inside the sandbox."""
+        ns = _run_in_sandbox(
+            "import zstandard; "
+            "data = zstandard.compress(b'deterministic payload'); "
+            "result = zstandard.decompress(data)"
+        )
+        assert ns["result"] == b"deterministic payload"
+
+    def test_zstandard_classes_allowed(self):
+        """ZstdCompressor and ZstdDecompressor should work inside the sandbox."""
+        ns = _run_in_sandbox(
+            "import zstandard; "
+            "cctx = zstandard.ZstdCompressor(); "
+            "dctx = zstandard.ZstdDecompressor(); "
+            "result = dctx.decompress(cctx.compress(b'streaming payload'))"
+        )
+        assert ns["result"] == b"streaming payload"
+
+    def test_host_zstandard_open_unaffected(self):
+        """zstandard.open on the host should remain unblocked."""
+        import zstandard
+
+        assert callable(zstandard.open)
+        _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
+        assert callable(zstandard.open)
+
+    def test_httpx2_import_succeeds_with_zstandard(self, monkeypatch: pytest.MonkeyPatch):
+        """httpx2 importing zstandard inside the sandbox should succeed."""
+
+        class _HideDevDeps:
+            def find_spec(self, fullname, path, target=None):
+                if fullname.split(".")[0] in ("rich", "pygments", "click"):
+                    raise ModuleNotFoundError(f"No module named {fullname}")
+
+        monkeypatch.setattr(sys, "meta_path", [_HideDevDeps(), *sys.meta_path])
+        ns = _run_in_sandbox("import httpx2; result = httpx2.__name__")
+        assert ns["result"] == "httpx2"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  io and _io restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestIoRestrictions:
+    def test_io_open_blocked(self):
+        """io.open should be blocked inside the sandbox."""
+        _raises_in_sandbox("import io; io.open('/dev/null')")
+
+    def test_pathlib_read_text_blocked(self):
+        """Transitive file operations via pathlib should be blocked."""
+        _raises_in_sandbox("import pathlib; pathlib.Path('/dev/null').read_text()")
+
+    def test_io_bytesio_allowed(self):
+        """In-memory io buffers should remain usable."""
+        ns = _run_in_sandbox("import io; result = io.BytesIO(b'hello').getvalue()")
+        assert ns["result"] == b"hello"
+
+    def test_host_io_open_unaffected(self):
+        """Host io.open should remain unblocked."""
+        import io
+
+        assert callable(io.open)
+        _raises_in_sandbox("import io; io.open('/dev/null')")
+        assert callable(io.open)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  asyncio in sandbox
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestAsyncioRestrictions:
+    def test_asyncio_imports(self):
+        """asyncio should be importable inside the sandbox."""
+        _run_in_sandbox("import asyncio")
+
+    def test_asyncio_run_blocked(self):
+        """asyncio.run cannot be used to escape the workflow loop."""
+        _raises_in_sandbox("import asyncio; asyncio.run(None)")
+
+    def test_asyncio_events_loop_escape_blocked(self):
+        """asyncio.events cannot be used to escape or overwrite the event loop."""
+        _raises_in_sandbox("import asyncio; asyncio.events.new_event_loop()")
+        _raises_in_sandbox("import asyncio; asyncio.events.set_event_loop(None)")
+        _raises_in_sandbox("import asyncio.events; asyncio.events.new_event_loop()")
+        _raises_in_sandbox("import asyncio.events; asyncio.events.set_event_loop(None)")
+        ns = _run_in_sandbox(
+            "import asyncio; "
+            "loop_cls = asyncio.events.AbstractEventLoop; "
+            "getter = asyncio.events.get_running_loop"
+        )
+        assert ns["loop_cls"] is not None
+        assert callable(ns["getter"])
+
+    @pytest.mark.parametrize(
+        ("module", "call"),
+        [
+            ("runners", "run(None)"),
+            ("subprocess", "create_subprocess_exec('echo')"),
+            ("threads", "to_thread(lambda: None)"),
+        ],
+    )
+    def test_asyncio_blocked_submodule_reexports(self, module, call):
+        """Blocked asyncio submodules cannot be reached through the package."""
+        _raises_in_sandbox(f"import asyncio; asyncio.{module}.{call}")
+
+    def test_host_asyncio_unaffected(self):
+        """Host asyncio functions should remain unblocked."""
+        import asyncio
+
+        assert callable(asyncio.run)
+        _raises_in_sandbox("import asyncio; asyncio.run(None)")
+        assert callable(asyncio.run)
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
+    async def test_taskgroup_works_in_sandbox(self):
+        """asyncio.TaskGroup must work inside the sandbox."""
+        with workflow_sandbox():
+            import asyncio
+
+            results = []
+
+            async def worker(value: int) -> None:
+                results.append(value)
+
+            async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
+                tg.create_task(worker(1))
+                tg.create_task(worker(2))
+
+            assert sorted(results) == [1, 2]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
+    async def test_taskgroup_cancels_siblings_on_error(self):
+        """TaskGroup must correctly cancel siblings when one task fails."""
+        with workflow_sandbox():
+            import asyncio
+
+            cancelled = asyncio.Event()
+
+            async def failing():
+                raise ValueError("boom")
+
+            async def slow():
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            with pytest.raises(ExceptionGroup) as exc_info:  # type: ignore[name-defined] # noqa: F821
+                async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
+                    tg.create_task(slow())
+                    tg.create_task(failing())
+
+            assert len(exc_info.value.exceptions) == 1
+            assert isinstance(exc_info.value.exceptions[0], ValueError)
+            assert cancelled.is_set()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  WorkflowLoop restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestWorkflowLoopRestrictions:
+    """WorkflowLoop blocks I/O, subprocess, and non-deterministic methods."""
+
+    @staticmethod
+    def _make_loop():
+        from khulnasoft.workflow._internal.loop import WorkflowLoop
+
+        class DummyWorkflow:
+            def resume(self):
+                pass
+
+            def time(self):
+                return 0.0
+
+            def check_suspended(self):
+                pass
+
+            def run_wait(self, spec):
+                pass
+
+        return WorkflowLoop(workflow=DummyWorkflow())
+
+    def test_loop_create_connection_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
+            loop.create_connection(None, "localhost", 80)
+
+    def test_loop_subprocess_exec_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
+            loop.subprocess_exec(None, "echo")
+
+    def test_loop_subprocess_shell_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.subprocess_shell"):
+            loop.subprocess_shell(None, "echo")
+
+    def test_loop_call_soon_allowed(self):
+        loop = self._make_loop()
+        called: list[int] = []
+        loop.call_soon(called.append, 1)
+        assert len(loop._ready) == 1
+
+    def test_loop_create_future_allowed(self):
+        loop = self._make_loop()
+        fut = loop.create_future()
+        assert not fut.done()
+
+    def test_loop_create_task_allowed(self):
+        import asyncio
+
+        loop = self._make_loop()
+
+        async def run():
+            task = loop.create_task(asyncio.sleep(0))
+            await task
+            assert task.done()
+
+        loop.run_until_complete(run())
+        loop.close()
+
+    def test_loop_nonexistent_attribute_raises_attribute_error(self):
+        loop = self._make_loop()
+        assert not hasattr(loop, "nonexistent_method")
+        assert getattr(loop, "nonexistent_method", None) is None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  blocked modules (stub modules)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestBlockedModules:
+    def test_subprocess_importable_but_calls_blocked(self):
+        """subprocess imports as a stub; calling anything raises."""
+        _run_in_sandbox("import subprocess")
+        _raises_in_sandbox("import subprocess; subprocess.run(['echo'])")
+        _raises_in_sandbox("import subprocess; subprocess.Popen(['echo'])")
+
+    def test_ctypes_blocked(self):
+        _run_in_sandbox("import ctypes")
+        _raises_in_sandbox("import ctypes; ctypes.CDLL('libc.so.6')")
+
+    def test_multiprocessing_blocked(self):
+        _run_in_sandbox("import multiprocessing")
+        _raises_in_sandbox("import multiprocessing; multiprocessing.Process()")
+
+    def test_signal_blocked(self):
+        _run_in_sandbox("import signal")
+        _raises_in_sandbox("import signal; signal.signal(2, lambda *a: None)")
+
+    def test_ssl_blocked(self):
+        _run_in_sandbox("import ssl")
+        _raises_in_sandbox("import ssl; ssl.create_default_context()")
+
+    def test_sqlite3_blocked(self):
+        _run_in_sandbox("import sqlite3")
+        _raises_in_sandbox("import sqlite3; sqlite3.connect(':memory:')")
+
+    def test_mmap_blocked(self):
+        _run_in_sandbox("import mmap")
+
+    def test_fcntl_blocked(self):
+        _run_in_sandbox("import fcntl")
+
+    def test_pty_blocked(self):
+        _run_in_sandbox("import pty")
+
+    def test_readline_blocked(self):
+        _run_in_sandbox("import readline")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  passthrough modules
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPassthroughModules:
+    """Passthrough modules should be the exact same object as the host."""
+
+    @pytest.mark.parametrize(
+        "mod",
+        [
+            "json",
+            "re",
+            "math",
+            "hashlib",
+            "base64",
+            "collections",
+            "itertools",
+            "functools",
+            "typing",
+            "dataclasses",
+            "decimal",
+            "enum",
+            "copy",
+            "zlib",
+            "abc",
+            "pprint",
+        ],
+    )
+    def test_passthrough_identity(self, mod: str):
+        host_mod = sys.modules.get(mod) or __import__(mod)
+        ns = _run_in_sandbox(f"import {mod}; result = {mod}")
+        assert ns["result"] is host_mod
+
+    def test_json_works(self):
+        ns = _run_in_sandbox("import json; result = json.loads('{\"a\": 1}')")
+        assert ns["result"] == {"a": 1}
+
+    def test_re_works(self):
+        ns = _run_in_sandbox("import re; result = re.findall(r'\\d+', 'abc123def456')")
+        assert ns["result"] == ["123", "456"]
+
+    def test_math_works(self):
+        ns = _run_in_sandbox("import math; result = math.sqrt(16)")
+        assert ns["result"] == 4.0
+
+    def test_zipimport_bootstrap_module_bypasses_finders(self, monkeypatch: pytest.MonkeyPatch):
+        sandbox = Sandbox()
+        assert sandbox.table["struct"] is struct
+
+        def unexpected_import(*args, **kwargs):
+            pytest.fail(f"preloaded module reached importlib: {args!r} {kwargs!r}")
+
+        monkeypatch.setattr(py_sandbox.importlib, "__import__", unexpected_import)
+        with sandbox.enter():
+            assert __import__("struct") is struct
+
+    def test_real_spec_finders_run_against_host_modules(self, monkeypatch: pytest.MonkeyPatch):
+        sandbox = Sandbox()
+        sandbox.table.pop("struct")
+        finder = next(f for f in sys.meta_path if isinstance(f, py_sandbox._SandboxFinder))
+        seen: list[object] = []
+
+        class RecordingFinder:
+            @staticmethod
+            def find_spec(fullname, path, target):
+                import struct as finder_struct
+
+                assert not py_sandbox.in_sandbox()
+                seen.append(finder_struct)
+                return None
+
+        index = sys.meta_path.index(finder)
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path[: index + 1], RecordingFinder()])
+        with sandbox.enter():
+            assert finder._find_real_spec("missing", None, None) is None
+
+        assert seen == [struct]
+        assert "struct" not in sandbox.table
+
+    def test_shutil_works(self):
+        _run_in_sandbox("import shutil")
+
+    def test_pathlib_works(self):
+        ns = _run_in_sandbox("import pathlib; result = isinstance(0, pathlib.Path)")
+        assert not ns["result"]
+
+    def test_collections_counter(self):
+        ns = _run_in_sandbox("from collections import Counter; result = dict(Counter('aabbc'))")
+        assert ns["result"] == {"a": 2, "b": 2, "c": 1}
+
+    def test_encodings_passthrough_shares_host_codec_modules(self):
+        """Regression: the C codec machinery imports ``encodings.<codec>``
+        on first use of an encoding and pins the module — plus a freshly
+        re-registered ``search_function`` — in interpreter state that can
+        never be cleared.  With ``encodings`` sandboxed, every first-use
+        codec lookup inside a run leaked a private copy of the package
+        (``encodings.aliases`` and the codec module); passthrough reuses
+        the host's modules so nothing new is pinned."""
+        import encodings
+
+        with workflow_sandbox():
+            # Exercise the C lookup path
+            assert b"\x81".decode("cp1006")
+            mod = sys.modules["encodings.cp1006"]
+            seen = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "encodings" or name.startswith("encodings.")
+            }
+
+        assert seen["encodings"] is encodings
+        assert seen["encodings.cp1006"] is mod
+        for name, module in seen.items():
+            assert sys.modules[name] is module
+
+    def test_passthrough_submodule_not_loaded_in_host(self, tmp_path):
+        """A submodule of a passthrough package that the host has not
+        imported yet must be imported into the host and shared — a fresh
+        sandbox import would be grafted onto the shared parent package,
+        mutating the host."""
+        import importlib
+
+        from khulnasoft.workflow._internal import py_sandbox
+
+        pkg = tmp_path / "pt_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "sub.py").write_text("value = 7\n")
+        sys.path.insert(0, str(tmp_path))
+        py_sandbox._PASSTHROUGHS.add("pt_pkg")
+        try:
+            host_pkg = importlib.import_module("pt_pkg")
+            assert "pt_pkg.sub" not in sys.modules
+            with workflow_sandbox():
+                sand_pkg = importlib.import_module("pt_pkg")
+                sub = importlib.import_module("pt_pkg.sub")
+                assert sand_pkg is host_pkg
+            assert sys.modules["pt_pkg.sub"] is sub
+            assert host_pkg.sub is sub
+        finally:
+            py_sandbox._PASSTHROUGHS.discard("pt_pkg")
+            sys.path.remove(str(tmp_path))
+            sys.modules.pop("pt_pkg", None)
+            sys.modules.pop("pt_pkg.sub", None)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SandboxPolicy.passthrough_modules
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPolicyPassthroughModules:
+    """SandboxPolicy.passthrough_modules extends the built-in passthrough set."""
+
+    def test_extra_module_shared_from_host(self):
+        import shlex as host_shlex
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
+        with workflow_sandbox(policy=policy):
+            import shlex
+
+            assert shlex is host_shlex
+
+    def test_covers_submodules(self):
+        import urllib.parse as host_parse
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"urllib"}))
+        with workflow_sandbox(policy=policy):
+            import urllib.parse
+
+            assert urllib.parse is host_parse
+
+    def test_scoped_to_policy(self):
+        import shlex as host_shlex
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
+        with workflow_sandbox(policy=policy):
+            import shlex as inside_with_policy
+        with workflow_sandbox():
+            import shlex as inside_plain
+
+        assert inside_with_policy is host_shlex
+        assert inside_plain is not host_shlex
+
+
+# ═══════════════════════════════════════════════════════════════
+#  module isolation
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestModuleIsolation:
+    def test_fresh_import_each_sandbox(self):
+        """Non-passthrough modules should be freshly imported each time."""
+        _run_in_sandbox(
+            "import asyncio; "
+            "assert 'asyncio' not in __builtins__.__dict__ "
+            "if hasattr(__builtins__, '__dict__') else True"
+        )
+
+    def test_sandbox_imports_do_not_leak_to_host(self):
+        """Imports inside a sandbox land in the run's private table, never the
+        host's real module table — the restricted proxy must not replace the
+        host's real module."""
+        import datetime as real_datetime
+
+        _run_in_sandbox("import datetime; _ = datetime.timedelta")
+        # Seen from outside any sandbox, the host module is the real one.
+        assert sys.modules["datetime"] is real_datetime
+
+    def test_finder_installed_once_and_inert_outside_sandbox(self):
+        """The finder is installed permanently (not per-run) and is a no-op
+        outside a sandbox, so ordinary imports are unaffected."""
+        import importlib
+
+        from khulnasoft.workflow._internal import py_sandbox
+
+        _run_in_sandbox("pass")  # ensure installed
+        finders = [f for f in sys.meta_path if isinstance(f, py_sandbox._SandboxFinder)]
+        assert len(finders) == 1
+        # Outside the sandbox the finder returns None, so a normal import works.
+        assert importlib.import_module("string") is sys.modules["string"]
+
+    def test_sandbox_classes_not_pinned_by_host_typing_caches(self):
+        """Regression: ``typing`` is passthrough, so subscripting a generic
+        with a sandbox-defined class (``List[C]`` — done implicitly by
+        pydantic when processing annotations) inserts a strong reference to
+        the class into host typing's lru_caches.  That pinned each run's
+        entire module graph until LRU eviction (~128 dead runs).  The
+        ``clear_typing_caches`` handler clears those caches on exit."""
+        import gc
+        import weakref
+
+        def make_ref(seed: str) -> weakref.ref:
+            with workflow_sandbox(policy=CLEANUP_ALL):
+                ns: dict = {"__builtins__": sys.modules["builtins"]}
+                exec(  # noqa: S102
+                    "import typing\n"
+                    "import weakref\n"
+                    "class C:\n"
+                    "    pass\n"
+                    "alias = typing.List[C]\n"
+                    "ref = weakref.ref(C)\n",
+                    ns,
+                )
+                return ns["ref"]
+
+        refs = [make_ref(f"seed-{i}") for i in range(3)]
+        gc.collect()
+        assert [r() for r in refs] == [None, None, None]
+
+    def test_sandbox_classes_not_pinned_by_pydantic_generics_cache(self):
+        """Regression: pydantic's ``_GENERIC_TYPES_CACHE`` is a
+        WeakValueDictionary whose keys strongly reference the parametrizing
+        classes.  The module-global binding of the parametrized model closes
+        a strong path from key to value through the cache, so entries never
+        self-evict and every run leaks its classes (and, through their
+        ``__globals__``, its module graph).  The
+        ``clear_pydantic_generics_cache`` handler clears it on exit."""
+        import gc
+        import weakref
+
+        code = (
+            "import typing\n"
+            "import weakref\n"
+            "import pydantic\n"
+            "T = typing.TypeVar('T')\n"
+            "class Param(pydantic.BaseModel):\n"
+            "    pass\n"
+            "class Gen(pydantic.BaseModel, typing.Generic[T]):\n"
+            "    x: typing.Optional[T] = None\n"
+            "alias = Gen[Param]\n"
+            "ref = weakref.ref(Param)\n"
+        )
+
+        def make_ref(seed: str) -> weakref.ref:
+            with workflow_sandbox(policy=CLEANUP_ALL):
+                ns: dict = {"__builtins__": sys.modules["builtins"]}
+                exec(code, ns)  # noqa: S102
+                return ns["ref"]
+
+        refs = [make_ref(f"seed-{i}") for i in range(3)]
+        gc.collect()
+        assert [r() for r in refs] == [None, None, None]
+
+    @pytest.mark.parametrize("end_barrier", [True, False])
+    @pytest.mark.parametrize("start_barrier", [True, False])
+    def test_concurrent_thread_sandboxes_have_independent_module_tables(
+        self, tmp_path, start_barrier: bool, end_barrier: bool
+    ):
+        """Regression: two workflow runs on different threads must each get a
+        private module table, so a module that mutates a shared singleton on
+        import (e.g. a workflow registry) re-imports cleanly per run instead of
+        colliding (the "Duplicate step name" failure).
+
+        Reproduces the cross-thread sys.modules race that the global
+        clear()/restore design could not survive. Run across the four
+        combinations of barriers at sandbox entry and exit, so isolation holds
+        whether or not the two sandboxes overlap in time."""
+        import importlib
+        import textwrap
+        import threading
+
+        pkgdir = tmp_path / "regpkg"
+        pkgdir.mkdir()
+        (pkgdir / "__init__.py").write_text("registry = {}\n")
+        (pkgdir / "mod.py").write_text(
+            textwrap.dedent("""
+                from regpkg import registry
+                name = "step//regpkg.mod.work"
+                assert name not in registry, "Duplicate step name: " + name
+                registry[name] = 1
+                """)
+        )
+        d = str(tmp_path)
+        sys.path.insert(0, d)
+
+        barrier = threading.Barrier(2)
+        results: dict[str, dict[str, int]] = {}
+        errors: list[str] = []
+
+        def run(seed: str) -> None:
+            try:
+                with workflow_sandbox():
+                    if start_barrier:
+                        barrier.wait()
+                    importlib.import_module("regpkg.mod")
+                    pkg = importlib.import_module("regpkg")
+                    results[seed] = pkg.registry
+                    if end_barrier:
+                        barrier.wait()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+                # Release a partner waiting on a barrier this thread won't reach.
+                barrier.abort()
+
+        try:
+            t1 = threading.Thread(target=run, args=("a",))
+            t2 = threading.Thread(target=run, args=("b",))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        finally:
+            sys.path.remove(d)
+
+        assert not errors, errors
+        # Each run imported into its own table -> its own registry instance,
+        # each holding exactly the single registration (no duplicate).
+        assert results["a"] is not results["b"]
+        assert results["a"] == results["b"] == {"step//regpkg.mod.work": 1}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  sandbox policy / teardown cleanups (khulnasoft.workflow.sandbox)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestSandboxPolicy:
+    def test_cleanup_handler_gets_run_module_snapshot(self):
+        """Handlers run once on teardown and see the run's module table."""
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(calls.append,))
+
+        with workflow_sandbox(policy=policy):
+            import shlex  # noqa: F401
+
+            assert not calls  # not during the run
+        (context,) = calls
+        assert "shlex" in context.run_modules
+
+    def test_cleanup_handlers_run_when_body_raises(self):
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(calls.append,))
+
+        with pytest.raises(ValueError, match="boom"):  # noqa: PT012
+            with workflow_sandbox(policy=policy):
+                raise ValueError("boom")
+        assert len(calls) == 1
+
+    def test_raising_handler_is_isolated(self, caplog):
+        """A failing handler is logged; later handlers still run and the
+        sandbox exits cleanly."""
+
+        def bad(context: SandboxCleanupContext) -> None:
+            raise RuntimeError("handler broke")
+
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(bad, calls.append))
+
+        with caplog.at_level("ERROR"):
+            with workflow_sandbox(policy=policy):
+                pass
+        assert len(calls) == 1
+        assert any("cleanup handler" in r.message for r in caplog.records)
+
+    def test_no_cleanups_by_default(self):
+        """The default policy runs no handlers, so host typing caches pin
+        the run's classes — the pinning ``ALL_CLEANUPS`` opts out of."""
+        import gc
+        import weakref
+
+        from khulnasoft.workflow._internal.py_sandbox import clear_typing_caches
+
+        with workflow_sandbox():
+            ns: dict = {"__builtins__": sys.modules["builtins"]}
+            exec(  # noqa: S102
+                "import typing\nimport weakref\n"
+                "class C:\n    pass\n"
+                "alias = typing.List[C]\n"
+                "ref = weakref.ref(C)\n",
+                ns,
+            )
+            ref: weakref.ref = ns["ref"]
+        del ns
+        gc.collect()
+        try:
+            assert ref() is not None
+        finally:
+            # Don't leave the pinned run behind for other tests.
+            clear_typing_caches(SandboxCleanupContext(run_modules={}))
+        gc.collect()
+        assert ref() is None
+
+    def test_workflows_threads_policy_to_registry(self):
+        from khulnasoft.workflow._internal import core
+
+        policy = SandboxPolicy(cleanups=())
+        registry = core.Workflows(as_khulnasoft_job=False, sandbox_policy=policy)
+        assert registry._sandbox_policy is policy
+        assert core.Workflows(as_khulnasoft_job=False)._sandbox_policy == SandboxPolicy()
+
+    @staticmethod
+    def _modules_seen_by_two_runs(policy: SandboxPolicy | None) -> list:
+        from khulnasoft.workflow._internal import core
+
+        registry = core.Workflows(as_khulnasoft_job=False, sandbox_policy=policy)
+        modules = []
+        for _ in range(2):
+            with registry._get_sandbox() as sandbox, sandbox.enter():
+                import uuid  # noqa: PLC0415
+
+                modules.append(uuid)
+        return modules
+
+    def test_shared_sandboxes_reuse_modules_across_runs(self):
+        """With share_sandboxes=True every run gets the one cached sandbox,
+        so a re-imported module is the same object run to run."""
+        first, second = self._modules_seen_by_two_runs(SandboxPolicy(share_sandboxes=True))
+        assert first is second
+
+    def test_unshared_sandboxes_import_modules_freshly_each_run(self):
+        """With share_sandboxes=False every run gets its own sandbox, and
+        with it its own fresh imports."""
+        first, second = self._modules_seen_by_two_runs(SandboxPolicy(share_sandboxes=False))
+        assert first is not second
+
+    def test_sandboxes_are_not_shared_by_default(self):
+        assert SandboxPolicy().share_sandboxes is False
+        first, second = self._modules_seen_by_two_runs(None)
+        assert first is not second

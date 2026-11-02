@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft-blob"
+dynamic = ["version", "dependencies"]
+description = "KhulnaSoft Blob Python SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "khulnasoft-internal-core>=0.2.0,<0.3.0",
+    "anyio>=4.0.0,<5",
+    "httpx2>=2",
+]
+
+[tool.uv.sources]
+khulnasoft-internal-core = { workspace = true }
+
+[tool.hatch.version]
+path = "khulnasoft/blob/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/khulnasoft/blob/**/*.py",
+    "/khulnasoft/blob/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = ["/**/__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/khulnasoft/blob"]
+exclude = ["/**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys -m 'not live'"
+asyncio_mode = "auto"
+markers = ["live: requires KhulnaSoft Blob credentials"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft-blob"
+explicit_package_bases = true
+packages = ["khulnasoft.blob"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

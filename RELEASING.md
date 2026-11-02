@@ -1,0 +1,258 @@
+# Releasing
+
+This repository releases workspace packages independently. A release may include
+one package or several packages, depending on handwritten news fragments and
+workspace dependency cascades.
+
+## Package Order
+
+Package discovery and release/build ordering come from `uv` workspace metadata,
+not from a hard-coded package list.
+
+Useful commands:
+
+```sh
+python scripts/workspace.py list --names --topological
+python scripts/workspace.py version khulnasoft-cache
+python scripts/workspace.py version-file khulnasoft-cache
+```
+
+## News Fragments
+
+User-visible changes need a news fragment under:
+
+```text
+changes/<package>/<id>.<type>.md
+```
+
+Valid types are:
+
+- `breaking` for major changes, or minor changes while the package is `0.x`
+- `feature` for minor changes
+- `bugfix` for patch fixes
+- `docs` for patch documentation changes
+- `internal` for patch internal changes
+
+Example:
+
+```text
+changes/khulnasoft-cache/123.bugfix.md
+```
+
+One news fragment is exactly one changelog entry. It may span several lines: a
+concise summary, optionally followed by blank-line-separated detail paragraphs,
+nested lists, or fenced code blocks. All of it belongs to that one entry.
+
+The release script renders the fragment as a single bullet, adding `- ` to the
+first line and indenting the rest so Markdown keeps them inside that bullet.
+Paragraph breaks and code blocks are preserved. Nothing in the fragment splits
+it into more entries; write a second fragment for a second entry.
+
+Dependency-only cascade releases do not need handwritten news fragments. The
+release script writes `Update dependencies.` for those changelog entries.
+
+Packages at `0.0.0` are unpublished and exempt from news-fragment enforcement
+and dependency-only cascades. Add a fragment deliberately when such a package
+is ready to publish; its first release is promoted to `0.1.0` regardless of the
+fragment type.
+
+## Release Prep
+
+Run:
+
+```sh
+uv run poe release-status
+uv run poe release
+```
+
+`release-status` prints the pending release set without editing files.
+
+`release` does all release PR file updates:
+
+- requires a clean Git working tree
+- creates a release branch named `<gh-username>/release-<timestamp>`
+- finds packages with news fragments
+- computes the semver bump for each package
+- walks reverse workspace dependencies
+- adds dependency-only patch releases for dependents whose workspace dependency
+  lower bounds need to move
+- updates package `version.py` files
+- prepends per-package `CHANGELOG.md` entries
+- removes consumed news fragments
+- runs `uv lock`
+- stages the release diff
+- opens `git commit -v` with a prepopulated `Release Packages` commit message
+- pushes the current branch
+- opens a pull request with `gh pr create` non-interactively and applies the `release` label
+
+News-fragment-backed changelog bullets include PR numbers when Git history for
+the news fragment contains GitHub squash subjects like
+`pkg: fix cache cleanup (#123)` or merge subjects like
+`Merge pull request #123 from user/branch`. Each fragment gets the number once,
+at the end of its summary, so a multi-line entry does not repeat the link on its
+detail paragraphs.
+Dependency-only cascade entries still render as `Update dependencies.` without a
+PR suffix.
+
+Review the staged verbose diff in the commit editor before saving the release
+commit. After a successful commit, the script pushes the current branch and
+opens the release PR.
+
+## Version Bumps
+
+Initial bump mapping:
+
+- `breaking` -> `major`
+- `feature` -> `minor`
+- `bugfix`, `docs`, `internal` -> `patch`
+
+For `0.x` packages, `breaking` bumps minor instead of major.
+
+If a package has multiple news fragments, the largest bump wins. If a package is
+also pulled in by a dependency cascade, its handwritten news fragment bump still
+wins over the dependency-only patch bump.
+
+## Dynamic Dependencies
+
+Package `pyproject.toml` files keep publishable dependency declarations in:
+
+```toml
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "khulnasoft-headers>=0.6.0",
+]
+```
+
+`project.dependencies` is dynamic. The Hatch metadata hook rewrites workspace
+dependencies at build time to use the current sibling package versions, while
+preserving markers, extras, and upper bounds. Third-party dependencies pass
+through unchanged.
+
+Local development still uses `[tool.uv.sources]` workspace links.
+
+Each package root has a `_khulnasoft_hatch_build.py` symlink to the shared
+`scripts/hatch_build.py` because Hatch resolves the custom metadata hook path
+relative to the package during local builds and during wheel builds from sdists.
+sdists include a real copy of the shared implementation at that path, so sdist
+rebuilds are self-contained without keeping a loader copy in every package.
+
+## Publishing
+
+Publishing is done by GitHub Actions through PyPI trusted publishing. Do not
+publish packages from a maintainer machine.
+
+When the release PR is merged to `main`, `.github/workflows/publish.yml`:
+
+- detects packages whose version file or changelog changed in the merge commit
+- builds and verifies every matched package in dependency order, using isolated
+  directories with locally built wheels from matched dependency ancestors
+- stops before any upload if a matched package fails to build or verify
+- publishes those same artifacts in dependency order with `uv publish` and OIDC
+  trusted publishing, uploading each eligible bundle before its standard distribution
+- creates and pushes `<package>-v<version>` tags after successful publish
+- creates matching GitHub releases
+
+The workflow skips the PyPI upload when the exact version already exists, but
+still creates the tag and GitHub release idempotently. This lets a failed tag or
+release step be retried after a successful upload.
+
+## Release PR dry runs
+
+The `release` label identifies release PRs. Titles and branch names do not control
+this check. `uv run poe release` applies the label when it creates the PR. For a
+manually prepared release PR, add the label before merging:
+
+```sh
+gh pr edit <number> --add-label release
+```
+
+The repository must define the label. When setting up a new repository or fork,
+create it once:
+
+```sh
+gh label create release --color 0E8A16 --description "Release PR requiring a publish dry run"
+```
+
+CI runs **Release publish dry run** for PRs targeting `main` with this label. It
+compares the PR's checked-out merge revision against the PR base SHA, so detection
+covers the full PR rather than only its latest commit. Pushes to the PR and label
+changes rerun CI. Ordinary PRs skip the dry-run job. **CI Overall** requires the job
+to succeed when it runs and accepts a skip when it does not apply.
+
+Release PR checks, manual dry runs, and real publishing call `scripts/publish.py`
+directly. They share package detection, the frozen shared-vendor version decision,
+builds, installed-wheel checks, registry reads, artifact selection, and release-body
+generation.
+
+The CLI has three stages:
+
+```sh
+uv run python scripts/publish.py detect --base <git-ref> --output plan.json
+uv run python scripts/publish.py build --plan plan.json --build-dir <directory>
+uv run python scripts/publish.py publish --plan <directory>/plan.json \
+  --build-dir <directory> [--dry-run]
+```
+
+Detection fails immediately if it cannot freeze the shared-vendor registry
+decision. Its typed JSON plan records native package entries and booleans, including
+the topological order, selected ancestors, versions, bundle names, and release
+bodies. Build and publish consume that file directly instead of reconstructing it
+from workflow environment variables.
+
+On main pushes and manual dispatches, a read-only job creates the plan. The build
+job consumes it, builds every package, and only after all builds and installed-wheel
+checks pass copies the plan into the build directory. That directory is uploaded as
+the `publish-packages` workflow artifact. The publish job downloads the self-contained
+artifact instead of rebuilding or recomputing release policy. A retry of the publish
+job reuses the same artifact. GitHub retains the artifacts for 14 days.
+
+Release PR CI runs the same build and publish commands as production as consecutive
+steps in one read-only job. The publish step uses `--dry-run`. In the main workflow,
+the separate publish job depends on a successful build job, which enforces the
+all-builds-before-upload barrier.
+
+An empty release set skips both jobs without requesting the `pypi` environment.
+Only real publication enables PyPI uploads and GitHub tag and release writes. PR
+and manual dry-run jobs have read-only repository access, no OIDC permission, and
+no `pypi` environment. The publishing job retains those permissions and environment
+protections.
+
+A dry run can fail because PyPI is unavailable or a required unmatched dependency
+version is not published. It does not validate OIDC authorization or prove that an
+existing PyPI artifact matches a fresh build. A release can also fail during an
+upload even after its dry run passes. Bundle and standard distributions upload in
+that order. Release tags and bodies are emitted only after both succeed; on retry,
+versions already present on PyPI are skipped and the missing distribution resumes.
+
+For a manual dry run, dispatch **Publish PyPI** with `dry_run=true`. Use
+`force=true` to inspect every publishable package instead of only the detected
+release set. Force does not overwrite existing artifacts or assign new versions.
+
+## Validation
+
+Before merging a release PR, run at least:
+
+```sh
+uv run poe lint-towncrier
+uv run pytest tests/unit/test_release_system.py
+uv build --package khulnasoft-cache --no-sources
+```
+
+For broader confidence, run:
+
+```sh
+./scripts/lint.sh
+./scripts/typecheck.sh
+./scripts/test.sh
+```
+
+`lint-towncrier` validates news fragment package names, news fragment filename
+types, and non-empty news fragment content. The Git `pre-push-news-fragments`
+hook generated from `scripts/githooks/pre-push.news-fragments.sh` runs `uv run
+poe check-news-fragments` to require news fragments for changed package code
+except for unpublished `0.0.0` packages, without maintaining a hard-coded
+package registry. `sync-githooks` installs
+pre-push hooks with `WORKSPACE_POE_GIT_SCOPE=commit`, so this check runs against
+the commit tree being pushed. The news fragment format is Towncrier-style, but
+enforcement is repo-local because stock Towncrier does not support
+`changes/<package>/` discovery without enumerating every package.

@@ -17,6 +17,7 @@ flowchart LR
 | Runtime cache | `khulnasoft.cache` | Cache values with TTLs and tag invalidation |
 | OIDC tokens | `khulnasoft.oidc` | Read identity and project claims |
 | Blob storage | `khulnasoft.blob` | Upload, list, download, and manage objects |
+| AI agents & models | `khulnasoft.ai` | Agents, models, tools, streaming, and telemetry |
 
 ## Contents
 
@@ -26,6 +27,7 @@ flowchart LR
 - [Runtime cache](#runtime-cache)
 - [OIDC tokens](#oidc-tokens)
 - [Blob storage](#blob-storage)
+- [AI agents & models](#ai-agents--models)
 - [Development](#development)
 
 ## Installation
@@ -36,7 +38,7 @@ pip install khulnasoft
 
 ## Requirements
 
-- Python 3.10 or later
+- Python 3.12 or later
 
 ## Request context
 
@@ -112,6 +114,7 @@ from khulnasoft.cache import AsyncRuntimeCache
 
 cache = AsyncRuntimeCache(namespace="demo")
 
+
 async def main():
     await cache.delete("greeting")
     await cache.set("greeting", {"hello": "world"}, {"ttl": 60, "tags": ["demo"]})
@@ -136,10 +139,12 @@ from khulnasoft.oidc import decode_oidc_payload, get_khulnasoft_oidc_token
 
 app = FastAPI()
 
+
 @app.middleware("http")
 async def khulnasoft_context_middleware(request: Request, call_next: Callable):
     set_headers(request.headers)
     return await call_next(request)
+
 
 @app.get("/oidc")
 def oidc():
@@ -234,13 +239,13 @@ result = auto_multipart_upload(
     large_data,  # bytes, file object, or iterator
     part_size=8 * 1024 * 1024,  # 8MB parts (default)
 )
-
 ```
 
 Asynchronous:
 
 ```python
 from khulnasoft.blob import auto_multipart_upload_async
+
 
 async def main():
     result = await auto_multipart_upload_async("large-file.bin", large_data)
@@ -338,15 +343,59 @@ result = complete_multipart_upload(
 
 See [`examples/blob_storage_multipart.py`](examples/blob_storage_multipart.py) for complete working examples.
 
+## AI agents & models
+
+`khulnasoft.ai` provides agents, models, tools, streaming, and telemetry:
+
+```python
+import khulnasoft.ai as ai
+
+agent = ai.Agent(tools=[...])
+
+async with agent.run(model, messages) as stream:
+    async for event in stream:
+        ...
+    print(stream.output)
+```
+
+Declare a tool with `@ai.tool`:
+
+```python
+@ai.tool
+async def fetch(url: str) -> str:
+    ...
+```
+
+Streaming tools use an `Aggregate` marker:
+
+```python
+@ai.tool
+async def research(topic: str) -> ai.StreamingStatusTool[str]:
+    yield "connecting..."
+    yield body  # final yield is the tool result
+```
+
+See [`ai.REFACTORING_PLAN`](AI_REFACTORING_PLAN.md) for the module refactoring plan and design notes.
+
 ## Development
 
-- Lint/typecheck/tests:
+- Install dependencies and run the canonical checks:
 ```bash
-uv sync --group dev
-uv run ruff format --check && uv run ruff check . && uv run mypy src && uv run pytest -v
+uv sync --all-packages
+uv run poe qa
 ```
-- CI runs lint, typecheck, examples as smoke tests, and builds wheels.
-- Publishing: push a tag (`vX.Y.Z`) that matches `project.version` to publish via PyPI Trusted Publishing.
+- Build every workspace package:
+```bash
+uv build --all-packages --no-sources
+```
+- Pull requests run `poe lint`, `poe typecheck`, `poe coverage`, the
+  news-fragment check, and a build of every package on Python 3.12. Pushes to
+  `main` and the nightly schedule also run the tests on Python 3.10 through
+  3.14.
+- Release and publishing steps are documented in [`RELEASING.md`](RELEASING.md).
+- Report security vulnerabilities as described in [`SECURITY.md`](SECURITY.md).
+- We follow the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md); by participating you
+  agree to its terms.
 
 ## License
 

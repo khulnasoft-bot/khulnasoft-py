@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "khulnasoft"
+dynamic = ["version", "dependencies"]
+description = "Python SDK for Khulnasoft"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "_khulnasoft_hatch_build.py"
+
+[tool.khulnasoft.release.dependencies]
+dependencies = [
+    "httpx2>=2",
+    "pydantic>=2.7.0,<3",
+    "anyio>=4.0.0,<5",
+    "typing-extensions>=4.0.0,<5 ; python_version < '3.11'",
+    "python-dotenv>=1.0.0,<2",
+    "websockets>=12.0,<17",
+    "khulnasoft-cache>=0.6.0",
+    "khulnasoft-headers>=0.6.0",
+    "khulnasoft-internal-core>=0.2.0,<0.3.0",
+    "khulnasoft-internal-telemetry>=0.6.0",
+    "khulnasoft-oidc>=0.6.0",
+    "khulnasoft-queue>=0.6.0",
+    "khulnasoft-sandbox>=0.2.0",
+    "khulnasoft-workflow>=0.9.0",
+]
+
+[project.scripts]
+khulnasoft = "khulnasoft.__main__:main"
+
+[tool.uv.sources]
+khulnasoft-cache = { workspace = true }
+khulnasoft-headers = { workspace = true }
+khulnasoft-internal-core = { workspace = true }
+khulnasoft-internal-telemetry = { workspace = true }
+khulnasoft-oidc = { workspace = true }
+khulnasoft-queue = { workspace = true }
+khulnasoft-sandbox = { workspace = true }
+khulnasoft-workflow = { workspace = true }
+
+[tool.hatch.version]
+path = "version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_khulnasoft_hatch_build.py" }
+include = [
+    "/**/*.py",
+    "/**/*.md",
+    "/cron/py.typed",
+    "/deployments/py.typed",
+    "/functions/py.typed",
+    "/project_routes/py.typed",
+    "/projects/py.typed",
+    "/pyproject.toml",
+    "/_khulnasoft_hatch_build.py",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = [".."]
+only-include = [
+    "/_internal/auth.py",
+    "/_internal/blob",
+    "/_internal/fs.py",
+    "/_internal/pagination.py",
+    "/_internal/project_routes",
+    "/cron",
+    "/deployments",
+    "/functions",
+    "/project_routes",
+    "/projects",
+    "/__main__.py",
+    "/client.py",
+    "/env.py",
+    "/README.md",
+    "/version.py",
+]
+exclude = [
+    "/pyproject.toml",
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"" = "khulnasoft"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys -m 'not live'"
+asyncio_mode = "auto"
+markers = [
+    "live: requires live API credentials (KHULNASOFT_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
+]
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/khulnasoft"
+explicit_package_bases = true
+packages = ["khulnasoft"]
+
+[tool.poe.tasks.lint]
+shell = """
+$RUFF_CHECK
+$RUFF_FORMAT
+"""
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-khulnasoft}"
+cwd = ".."
+
+[tool.poe.tasks.test]
+cmd = "$PYTEST"
