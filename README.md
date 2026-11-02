@@ -17,6 +17,7 @@ flowchart LR
 | Runtime cache | `khulnasoft.cache` | Cache values with TTLs and tag invalidation |
 | OIDC tokens | `khulnasoft.oidc` | Read identity and project claims |
 | Blob storage | `khulnasoft.blob` | Upload, list, download, and manage objects |
+| AI agents & models | `khulnasoft.ai` | Agents, models, tools, streaming, and telemetry |
 
 ## Contents
 
@@ -26,6 +27,7 @@ flowchart LR
 - [Runtime cache](#runtime-cache)
 - [OIDC tokens](#oidc-tokens)
 - [Blob storage](#blob-storage)
+- [AI agents & models](#ai-agents--models)
 - [Development](#development)
 
 ## Installation
@@ -36,7 +38,7 @@ pip install khulnasoft
 
 ## Requirements
 
-- Python 3.10 or later
+- Python 3.12 or later
 
 ## Request context
 
@@ -340,6 +342,40 @@ result = complete_multipart_upload(
 ```
 
 See [`examples/blob_storage_multipart.py`](examples/blob_storage_multipart.py) for complete working examples.
+
+## AI agents & models
+
+`khulnasoft.ai` provides agents, models, tools, streaming, and telemetry:
+
+```python
+import khulnasoft.ai as ai
+
+agent = ai.Agent(tools=[...])
+
+async with agent.run(model, messages) as stream:
+    async for event in stream:
+        ...
+    print(stream.output)
+```
+
+Declare a tool with `@ai.tool`:
+
+```python
+@ai.tool
+async def fetch(url: str) -> str:
+    ...
+```
+
+Streaming tools use an `Aggregate` marker:
+
+```python
+@ai.tool
+async def research(topic: str) -> ai.StreamingStatusTool[str]:
+    yield "connecting..."
+    yield body  # final yield is the tool result
+```
+
+See [`ai.REFACTORING_PLAN`](AI_REFACTORING_PLAN.md) for the module refactoring plan and design notes.
 
 ## Development
 
