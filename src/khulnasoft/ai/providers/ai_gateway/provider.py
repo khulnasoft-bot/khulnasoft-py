@@ -113,4 +113,3 @@ class GatewayProvider(base.Provider[gateway_client.GatewayClient]):
         if api_key:
             return api_key, "api-key"
         return None, None
-

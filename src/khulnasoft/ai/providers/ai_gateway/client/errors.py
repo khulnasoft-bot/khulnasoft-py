@@ -109,4 +109,3 @@ class GatewayAuthenticationError(GatewayError):
             status_code=status_code,
             generation_id=generation_id,
         )
-
