@@ -33,8 +33,8 @@ def _default_random() -> random.Random:
     return random.Random()
 
 
-_id_random: contextvars.ContextVar[random.Random | None] = (
-    contextvars.ContextVar("id_random", default=None)
+_id_random: contextvars.ContextVar[random.Random | None] = contextvars.ContextVar(
+    "id_random", default=None
 )
 
 
@@ -161,10 +161,7 @@ class FilePart(pydantic.BaseModel):
                 or media.detect_video_media_type(data)
             )
         if media_type is None:
-            raise ValueError(
-                "Cannot detect media_type from bytes. "
-                "Provide media_type explicitly."
-            )
+            raise ValueError("Cannot detect media_type from bytes. Provide media_type explicitly.")
         return cls(data=data, media_type=media_type, filename=filename)
 
 
@@ -198,13 +195,11 @@ class MessageBundle(pydantic.BaseModel):
 
 SpecialToolResult = ContentOutput | MessageBundle
 
-_SPECIAL_TOOL_RESULT_ADAPTER: pydantic.TypeAdapter[SpecialToolResult] = (
-    pydantic.TypeAdapter(
-        Annotated[
-            SpecialToolResult,
-            pydantic.Field(discriminator="type"),
-        ]
-    )
+_SPECIAL_TOOL_RESULT_ADAPTER: pydantic.TypeAdapter[SpecialToolResult] = pydantic.TypeAdapter(
+    Annotated[
+        SpecialToolResult,
+        pydantic.Field(discriminator="type"),
+    ]
 )
 
 
@@ -303,9 +298,7 @@ class ToolResultPart(pydantic.BaseModel):
 
     @pydantic.model_validator(mode="before")
     @classmethod
-    def _restore_special_results(
-        cls, data: Any, info: pydantic.ValidationInfo
-    ) -> Any:
+    def _restore_special_results(cls, data: Any, info: pydantic.ValidationInfo) -> Any:
         """Rebuild typed special values after a JSON round-trip.
 
         ``result`` and ``model_input`` are ``Any``, so pydantic restores a
@@ -317,19 +310,13 @@ class ToolResultPart(pydantic.BaseModel):
 
         data = {**data}
         model_input = data.get("model_input", MODEL_INPUT_UNSET)
-        if "model_input_kind" not in data and isinstance(
-            model_input, SpecialToolResult
-        ):
+        if "model_input_kind" not in data and isinstance(model_input, SpecialToolResult):
             data["model_input_kind"] = "special"
-        if data.get("result_kind") == "special" and isinstance(
-            data.get("result"), dict
-        ):
+        if data.get("result_kind") == "special" and isinstance(data.get("result"), dict):
             data["result"] = _SPECIAL_TOOL_RESULT_ADAPTER.validate_python(
                 data["result"], context=info.context
             )
-        if data.get("model_input_kind") == "special" and isinstance(
-            data.get("model_input"), dict
-        ):
+        if data.get("model_input_kind") == "special" and isinstance(data.get("model_input"), dict):
             data["model_input"] = _SPECIAL_TOOL_RESULT_ADAPTER.validate_python(
                 data["model_input"], context=info.context
             )
@@ -343,9 +330,7 @@ class ToolResultPart(pydantic.BaseModel):
         if info.context is None:
             return self
 
-        context = cast(
-            "dict[str, dict[str, ToolResultValidatorTool]]", info.context
-        )
+        context = cast("dict[str, dict[str, ToolResultValidatorTool]]", info.context)
         tools_by_name = context.get("ai.tools", {})
         tool = tools_by_name.get(self.tool_name)
         if tool is None or tool.return_type is None:
@@ -404,18 +389,14 @@ class ToolCallPart(pydantic.BaseModel):
     # running the tool body again.
     cached_result: ToolResultPart | None = pydantic.Field(
         default=None,
-        exclude_if=cast(
-            "Callable[[Any], bool]", weakref.proxy(_exclude_if_none)
-        ),
+        exclude_if=cast("Callable[[Any], bool]", weakref.proxy(_exclude_if_none)),
         repr=False,
     )
 
     kind: Literal["tool_call"] = "tool_call"
 
 
-DUMMY_TOOL_CALL = ToolCallPart(
-    id="<invalid>", tool_call_id="", tool_name="", tool_args=""
-)
+DUMMY_TOOL_CALL = ToolCallPart(id="<invalid>", tool_call_id="", tool_name="", tool_args="")
 
 
 class BuiltinToolCallPart(pydantic.BaseModel):
@@ -507,9 +488,7 @@ class Message(pydantic.BaseModel):
     # producing a duplicate turn.
     replay: bool = pydantic.Field(
         default=False,
-        exclude_if=cast(
-            "Callable[[Any], bool]", weakref.proxy(_exclude_if_falsy)
-        ),
+        exclude_if=cast("Callable[[Any], bool]", weakref.proxy(_exclude_if_falsy)),
         repr=False,
     )
 
@@ -521,9 +500,7 @@ class Message(pydantic.BaseModel):
     @property
     def reasoning(self) -> str:
         """Concatenated reasoning parts."""
-        return "".join(
-            p.text for p in self.parts if isinstance(p, ReasoningPart)
-        )
+        return "".join(p.text for p in self.parts if isinstance(p, ReasoningPart))
 
     @property
     def tool_calls(self) -> list[ToolCallPart]:
@@ -561,9 +538,7 @@ class Message(pydantic.BaseModel):
     def get_output(self, output_type: None = None) -> str: ...
     @overload
     def get_output[T: pydantic.BaseModel](self, output_type: type[T]) -> T: ...
-    def get_output(
-        self, output_type: type[pydantic.BaseModel] | None = None
-    ) -> Any:
+    def get_output(self, output_type: type[pydantic.BaseModel] | None = None) -> Any:
         """Return the final output of this assistant turn.
 
         With no ``output_type``, returns the concatenated text content.
